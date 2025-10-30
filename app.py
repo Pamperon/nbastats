@@ -48,7 +48,7 @@ def get_player_id(player_name):
 
     return None
 
-def get_game_logs(player_id, season='2025-26'):
+def get_game_logs(player_id, season='2024-26'):
     time.sleep(0.6)
     logs = playergamelog.PlayerGameLog(player_id=player_id, season=season, season_type_all_star='Regular Season')
     df = logs.get_data_frames()[0]
@@ -89,7 +89,7 @@ def get_all_gamelogs(player_id):
         return pd.DataFrame()
 
 def get_season_gamelog(player_id):
-    gamelog = playergamelog.PlayerGameLog(player_id=player_id, season='2025-26', season_type_all_star='Regular Season')
+    gamelog = playergamelog.PlayerGameLog(player_id=player_id, season='2024-26', season_type_all_star='Regular Season')
     df = gamelog.get_data_frames()[0]
     df['GAME_DATE'] = pd.to_datetime(df['GAME_DATE'], errors='coerce')
     return df.sort_values(by="GAME_DATE", ascending=False)
@@ -99,7 +99,7 @@ def get_all_teams_rosters():
     rosters = {}
     for team in teams.get_teams():
         try:
-            roster = commonteamroster.CommonTeamRoster(team_id=team['id'], season='2025-26')
+            roster = commonteamroster.CommonTeamRoster(team_id=team['id'], season='2024-26')
             df_roster = roster.get_data_frames()[0]
             for _, row in df_roster.iterrows():
                 rosters[row['PLAYER_ID']] = team['abbreviation']

@@ -1,10 +1,6 @@
-# app.py — NBA Stats (compatto/centrato)
-# - Layout centrato (no full width)
-# - Max width pagina 900px
-# - Grafico compatto (8x3) e non a tutta pagina
-# - Ultime 5/10 cross-stagione; Intera stagione = solo corrente
-# - NIENTE media mobile
+# app.py — NBA Stats (centrato/compatto + linea .5 step 1 + vs avversario esteso)
 
+import math
 import datetime as dt
 import time
 import unicodedata
@@ -17,7 +13,7 @@ from nba_api.stats.static import players, teams
 from nba_api.stats.endpoints import playergamelog, commonteamroster
 
 # -------------------- CONFIG UI --------------------
-st.set_page_config(page_title="NBA Stats", layout="centered")  # << centrato
+st.set_page_config(page_title="NBA Stats", layout="centered")
 
 # Limita la larghezza massima del contenitore centrale
 st.markdown(
@@ -25,7 +21,7 @@ st.markdown(
     <style>
     .block-container {
         padding-top: 0.75rem;
-        max-width: 900px;   /* << restringe la pagina */
+        max-width: 900px;
         margin: auto;
     }
     label[data-testid="stWidgetLabel"] > div:empty {display:none;}
@@ -68,6 +64,15 @@ def with_retry(fn, *args, attempts: int = 3, wait_secs: float = 0.8, **kwargs):
                 time.sleep(wait_secs)
     raise last_exc
 
+# forza qualunque numero al formato N + 0.5 (ed applica i limiti)
+def force_half(value: float, min_v: float = 0.0, max_v: float = 120.0) -> float:
+    v = math.floor(value) + 0.5
+    if v < min_v + 0.5:
+        v = min_v + 0.5
+    if v > max_v - 0.5:
+        v = max_v - 0.5
+    return v
+
 # -------------------- DATA LAYERS (CACHED) --------------------
 @st.cache_data(ttl=3600)
 def cached_all_players() -> List[Dict]:
@@ -109,6 +114,30 @@ def get_player_gamelog(player_id: int, season: str = CURRENT_SEASON) -> pd.DataF
         df[c] = pd.to_numeric(df[c], errors="coerce")
     df["PAR"] = df["PTS"] + df["AST"] + df["REB"]
     return df.sort_values("GAME_DATE", ascending=False)
+
+@st.cache_data(ttl=6 * 3600)
+def get_player_full_history(player_id: int, start_year: int = 2000) -> pd.DataFrame:
+    frames = []
+    for year in range(start_year, dt.date.today().year + 1):
+        season = f"{year}-{str(year + 1)[-2:]}"
+        try:
+            def _call():
+                return playergamelog.PlayerGameLog(
+                    player_id=player_id, season=season, season_type_all_star="Regular Season"
+                ).get_data_frames()[0]
+            df = with_retry(_call)
+            df["GAME_DATE"] = pd.to_datetime(df["GAME_DATE"], errors="coerce")
+            for c in ("PTS", "AST", "REB"):
+                df[c] = pd.to_numeric(df[c], errors="coerce")
+            df["PAR"] = df["PTS"] + df["AST"] + df["REB"]
+            frames.append(df)
+            time.sleep(0.2)
+        except Exception:
+            continue
+    if not frames:
+        return pd.DataFrame()
+    out = pd.concat(frames, ignore_index=True)
+    return out.sort_values("GAME_DATE", ascending=False)
 
 @st.cache_data(ttl=6 * 3600)
 def teams_roster_map(season: str = CURRENT_SEASON) -> Dict[int, str]:
@@ -183,8 +212,7 @@ def plot_bar(df: pd.DataFrame, col: str, line: float, title: str,
     labels = dd["GAME_DATE"].dt.strftime("%m/%d")
     values = dd[col].astype(float)
 
-    # Grafico compatto
-    fig, ax = plt.subplots(figsize=(8, 3))  # << più piccolo
+    fig, ax = plt.subplots(figsize=(8, 3))  # compatto
     colors = ["#10B981" if v > line else "#EF4444" for v in values]
     bars = ax.bar(range(len(values)), values, width=0.6, color=colors)
 
@@ -195,7 +223,7 @@ def plot_bar(df: pd.DataFrame, col: str, line: float, title: str,
 
     ax.axhline(line, color="#9CA3AF", linestyle="--", linewidth=1.2, label=f"Linea {line:g}")
 
-    # stile dark compatto
+    # stile dark
     fig.patch.set_facecolor("#0b0f14")
     ax.set_facecolor("#121821")
     ax.tick_params(colors="#e5e7eb", labelsize=9)
@@ -214,7 +242,7 @@ def plot_bar(df: pd.DataFrame, col: str, line: float, title: str,
         ax.set_xticks([])
 
     ax.legend(facecolor="#121821", edgecolor="#374151", labelcolor="#e5e7eb", fontsize=9)
-    st.pyplot(fig)  # niente use_container_width -> non si allarga
+    st.pyplot(fig)
 
 # -------------------- UI: TABS --------------------
 tab_batch, tab_single = st.tabs(["📥 Analisi batch da Excel", "🔍 Ricerca giocatore singolo"])
@@ -340,12 +368,16 @@ with tab_single:
 
             df_cur = filter_game_type(df_cur, game_type)
 
+            # --- Linea: solo .5, scatti di 1 ---
             defaults = {"PTS": 20.5, "AST": 5.5, "REB": 6.5, "PAR": 30.5}
             default_line = defaults[col]
-            line = st.number_input(f"🎯 Inserisci la linea {m.lower()}",
-                                   min_value=0.0, max_value=120.0, value=default_line, step=0.5)
-            if line % 1 == 0:
-                line += 0.5
+            # Invito a muoversi di 1 con offset .5; format una cifra decimale
+            line_raw = st.number_input(
+                f"🎯 Inserisci la linea {m.lower()}",
+                min_value=0.0, max_value=120.0, value=default_line, step=1.0, format="%.1f",
+                help="Si muove di 1 alla volta ed è sempre .5 (es. 20.5 → 21.5 → 22.5)."
+            )
+            line = force_half(line_raw)
 
             # --- Grafico ---
             st.subheader("📈 Grafico")
@@ -386,12 +418,32 @@ with tab_single:
                 f"Under {pall_under}% ({uc}/{len(df_cur)}), Push {pall_push}% ({pc}/{len(df_cur)})"
             )
 
-            # --- Vs Avversario (stagione corrente per coerenza con grafico "Intera stagione") ---
+            # --- Vs Avversario: stagione corrente, stagione precedente, carriera ---
             st.subheader("🆚 Storico vs avversario")
             team_abbrs = sorted({t["abbreviation"] for t in cached_teams()})
             opp = st.selectbox("Seleziona squadra avversaria", ["—"] + team_abbrs)
 
             if opp != "—":
-                df_vs = df_cur[df_cur["MATCHUP"].str.contains(opp, na=False)]
-                pov, ovc, totc = percent_over(df_vs[col], line)
-                st.write(f"**Stagione corrente vs {opp}**: {pov}% over ({ovc}/{totc})")
+                # Corrente
+                df_vs_cur = df_cur[df_cur["MATCHUP"].str.contains(opp, na=False)]
+                pov_cur, ovc_cur, totc_cur = percent_over(df_vs_cur[col], line)
+
+                # Precedente
+                prev = prev_season(CURRENT_SEASON)
+                try:
+                    df_prev = get_player_gamelog(pid, season=prev)
+                    df_prev = filter_game_type(df_prev, game_type)
+                except Exception:
+                    df_prev = pd.DataFrame()
+                df_vs_prev = df_prev[df_prev["MATCHUP"].str.contains(opp, na=False)]
+                pov_prev, ovc_prev, totc_prev = percent_over(df_vs_prev[col], line)
+
+                # Carriera (tutte le stagioni), rispettando Casa/Ospite
+                df_hist = get_player_full_history(pid)
+                df_hist = filter_game_type(df_hist, game_type)
+                df_vs_all = df_hist[df_hist["MATCHUP"].str.contains(opp, na=False)]
+                pov_all, ovc_all, totc_all = percent_over(df_vs_all[col], line)
+
+                st.write(f"**Stagione corrente vs {opp}**: {pov_cur}% over ({ovc_cur}/{totc_cur})")
+                st.write(f"**Stagione precedente vs {opp}**: {pov_prev}% over ({ovc_prev}/{totc_prev})")
+                st.write(f"**Carriera vs {opp}**: {pov_all}% over ({ovc_all}/{totc_all})")

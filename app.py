@@ -1,9 +1,9 @@
-# app.py — NBA Stats (custom tweaks)
-# Modifiche richieste:
-# - Rimossa media mobile
-# - "Ultime 5/10" integrano partite della stagione precedente se mancano gare in quella attuale
-# - "Intera stagione" resta solo stagione corrente
-# - Grafico dimensioni compatte (non a tutta pagina)
+# app.py — NBA Stats (compatto/centrato)
+# - Layout centrato (no full width)
+# - Max width pagina 900px
+# - Grafico compatto (8x3) e non a tutta pagina
+# - Ultime 5/10 cross-stagione; Intera stagione = solo corrente
+# - NIENTE media mobile
 
 import datetime as dt
 import time
@@ -17,11 +17,17 @@ from nba_api.stats.static import players, teams
 from nba_api.stats.endpoints import playergamelog, commonteamroster
 
 # -------------------- CONFIG UI --------------------
-st.set_page_config(page_title="NBA Stats", layout="wide")
+st.set_page_config(page_title="NBA Stats", layout="centered")  # << centrato
+
+# Limita la larghezza massima del contenitore centrale
 st.markdown(
     """
     <style>
-    .block-container {padding-top: 1rem;}
+    .block-container {
+        padding-top: 0.75rem;
+        max-width: 900px;   /* << restringe la pagina */
+        margin: auto;
+    }
     label[data-testid="stWidgetLabel"] > div:empty {display:none;}
     </style>
     """,
@@ -45,7 +51,6 @@ def season_string_for_today(today: Optional[dt.date] = None) -> str:
     return f"{start}-{end:02d}"
 
 def prev_season(season: str) -> str:
-    # "2025-26" -> "2024-25"
     y1 = int(season[:4]) - 1
     y2 = (y1 + 1) % 100
     return f"{y1}-{y2:02d}"
@@ -152,16 +157,11 @@ def filter_game_type(df: pd.DataFrame, game_type: str) -> pd.DataFrame:
     return df
 
 def get_last_n_games_cross_seasons(player_id: int, n: int, game_type: str) -> pd.DataFrame:
-    """
-    Restituisce le ultime n partite prendendo prima la stagione corrente,
-    e se non bastano integra con la stagione precedente (sempre Regular Season).
-    """
-    cur = get_player_gamelog(player_id, season=CURRENT_SEASON)
+    cur = get_player_gamelog(player_id, season= CURRENT_SEASON)
     cur = filter_game_type(cur, game_type)
     if len(cur) >= n:
         return cur.head(n)
 
-    # Integra con stagione precedente
     prev = prev_season(CURRENT_SEASON)
     try:
         prev_df = get_player_gamelog(player_id, season=prev)
@@ -183,38 +183,38 @@ def plot_bar(df: pd.DataFrame, col: str, line: float, title: str,
     labels = dd["GAME_DATE"].dt.strftime("%m/%d")
     values = dd[col].astype(float)
 
-    # dimensioni compatte, niente use_container_width
-    fig, ax = plt.subplots(figsize=(10, 4))
+    # Grafico compatto
+    fig, ax = plt.subplots(figsize=(8, 3))  # << più piccolo
     colors = ["#10B981" if v > line else "#EF4444" for v in values]
     bars = ax.bar(range(len(values)), values, width=0.6, color=colors)
 
     if show_vals and not compact:
         for i, bar in enumerate(bars):
-            ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.4,
-                    f"{values.iloc[i]:.0f}", ha="center", va="bottom", fontsize=9, color="#e5e7eb")
+            ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.3,
+                    f"{values.iloc[i]:.0f}", ha="center", va="bottom", fontsize=8, color="#e5e7eb")
 
-    ax.axhline(line, color="#9CA3AF", linestyle="--", linewidth=1.5, label=f"Linea {line:g}")
+    ax.axhline(line, color="#9CA3AF", linestyle="--", linewidth=1.2, label=f"Linea {line:g}")
 
     # stile dark compatto
     fig.patch.set_facecolor("#0b0f14")
     ax.set_facecolor("#121821")
-    ax.tick_params(colors="#e5e7eb")
+    ax.tick_params(colors="#e5e7eb", labelsize=9)
     ax.xaxis.label.set_color("#e5e7eb")
     ax.yaxis.label.set_color("#e5e7eb")
     ax.title.set_color("#e5e7eb")
 
-    ax.set_title(title, fontsize=14, fontweight="bold")
-    ax.set_ylabel(col)
+    ax.set_title(title, fontsize=13, fontweight="bold")
+    ax.set_ylabel(col, fontsize=10)
     ax.set_xlabel("")
 
     if not compact:
         ax.set_xticks(range(len(labels)))
-        ax.set_xticklabels(labels, rotation=rotate, ha="right", fontsize=9)
+        ax.set_xticklabels(labels, rotation=rotate, ha="right", fontsize=8)
     else:
         ax.set_xticks([])
 
-    ax.legend(facecolor="#121821", edgecolor="#374151", labelcolor="#e5e7eb")
-    st.pyplot(fig)  # NOT use_container_width
+    ax.legend(facecolor="#121821", edgecolor="#374151", labelcolor="#e5e7eb", fontsize=9)
+    st.pyplot(fig)  # niente use_container_width -> non si allarga
 
 # -------------------- UI: TABS --------------------
 tab_batch, tab_single = st.tabs(["📥 Analisi batch da Excel", "🔍 Ricerca giocatore singolo"])
@@ -277,7 +277,7 @@ with tab_batch:
 
             col = metric_map[metric_choice]
 
-            # Ultime 5/10: cross-stagione se insufficiente
+            # Ultime 5/10 cross-stagione
             last5 = get_last_n_games_cross_seasons(pid, 5, "Totale")
             last10 = get_last_n_games_cross_seasons(pid, 10, "Totale")
 
@@ -338,10 +338,8 @@ with tab_single:
                 st.error(f"Errore nel recupero dati: {e}")
                 st.stop()
 
-            # Filtri casa/trasferta per la vista e le statistiche stagione
             df_cur = filter_game_type(df_cur, game_type)
 
-            # Linea
             defaults = {"PTS": 20.5, "AST": 5.5, "REB": 6.5, "PAR": 30.5}
             default_line = defaults[col]
             line = st.number_input(f"🎯 Inserisci la linea {m.lower()}",
@@ -374,13 +372,12 @@ with tab_single:
 
             # --- Statistiche ---
             st.subheader(f"📊 Statistiche {m.lower()}")
-            # Per Ultime 5/10 calcolo cross-stagione
             last5 = get_last_n_games_cross_seasons(pid, 5, game_type)
             last10 = get_last_n_games_cross_seasons(pid, 10, game_type)
 
             p5, o5, t5 = percent_over(last5[col], line)
             p10, o10, t10 = percent_over(last10[col], line)
-            pall_over, pall_under, pall_push, oc, uc, pc = calculate_over_under_push(df_cur[col], line)  # solo stagione corrente
+            pall_over, pall_under, pall_push, oc, uc, pc = calculate_over_under_push(df_cur[col], line)  # corrente
 
             st.write(f"**Ultime 5 (cross-stagione)**: {p5}% over ({o5}/{t5})")
             st.write(f"**Ultime 10 (cross-stagione)**: {p10}% over ({o10}/{t10})")
@@ -389,14 +386,12 @@ with tab_single:
                 f"Under {pall_under}% ({uc}/{len(df_cur)}), Push {pall_push}% ({pc}/{len(df_cur)})"
             )
 
-            # --- Vs Avversario (resta su storico stagione corrente per coerenza con grafico Intera stagione?) ---
+            # --- Vs Avversario (stagione corrente per coerenza con grafico "Intera stagione") ---
             st.subheader("🆚 Storico vs avversario")
             team_abbrs = sorted({t["abbreviation"] for t in cached_teams()})
             opp = st.selectbox("Seleziona squadra avversaria", ["—"] + team_abbrs)
 
             if opp != "—":
-                # Per coerenza con la tua richiesta, manteniamo "Intera stagione" solo corrente.
-                # Quindi il vs avversario lo calcoliamo sulla corrente (con filtri casa/trasferta).
                 df_vs = df_cur[df_cur["MATCHUP"].str.contains(opp, na=False)]
                 pov, ovc, totc = percent_over(df_vs[col], line)
                 st.write(f"**Stagione corrente vs {opp}**: {pov}% over ({ovc}/{totc})")

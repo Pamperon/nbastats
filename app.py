@@ -1,5 +1,6 @@
 # app.py — NBA Stats + Bet365 Extractor (centrato/compatto)
-# - Valori sulle barre SEMPRE visibili (niente checkbox)
+# - Batch: rimosso teams_roster_map(); sigla squadra dal TEAM_ABBREVIATION del gamelog
+# - Valori sulle barre SEMPRE visibili
 # - "Ultime 5/10" cross-stagione; "Intera stagione" = solo stagione corrente
 # - Vs avversario: stagione corrente, precedente, carriera
 # - Nuova scheda: 🧩 Estrazione Bet365 (HTML → Excel/CSV)
@@ -17,7 +18,7 @@ import pandas as pd
 import streamlit as st
 from bs4 import BeautifulSoup
 from nba_api.stats.static import players, teams
-from nba_api.stats.endpoints import playergamelog, commonteamroster
+from nba_api.stats.endpoints import playergamelog
 
 # -------------------- CONFIG UI --------------------
 st.set_page_config(page_title="NBA Stats + Bet365", layout="centered")
@@ -141,21 +142,6 @@ def get_player_full_history(player_id: int, start_year: int = 2000) -> pd.DataFr
         return pd.DataFrame()
     out = pd.concat(frames, ignore_index=True)
     return out.sort_values("GAME_DATE", ascending=False)
-
-@st.cache_data(ttl=6 * 3600)
-def teams_roster_map(season: str = CURRENT_SEASON) -> Dict[int, str]:
-    mapping: Dict[int, str] = {}
-    for t in cached_teams():
-        try:
-            def _call():
-                return commonteamroster.CommonTeamRoster(team_id=t["id"], season=season).get_data_frames()[0]
-            roster = with_retry(_call)
-            for _, row in roster.iterrows():
-                mapping[int(row["PLAYER_ID"])] = t["abbreviation"]
-            time.sleep(0.2)
-        except Exception:
-            continue
-    return mapping
 
 # -------------------- HELPERS STATS --------------------
 def percent_over(series: pd.Series, line: float) -> Tuple[float, int, int]:
@@ -387,7 +373,6 @@ with tab_batch:
         st.success("File caricato correttamente. Avvio analisi…")
         results = []
         progress = st.progress(0)
-        roster_map = teams_roster_map()
 
         for i, row in df_in.iterrows():
             player_name = str(row["Giocatore"])
@@ -404,17 +389,26 @@ with tab_batch:
                 continue
 
             try:
-                glog = get_player_gamelog(pid)  # stagione corrente (per % stagione)
+                glog = get_player_gamelog(pid)  # stagione corrente (per % stagione e TEAM_ABBREVIATION)
             except Exception:
                 results.append({
-                    "Giocatore": player_name, "Squadra": roster_map.get(pid, "N/D"), "Linea": line,
+                    "Giocatore": player_name, "Squadra": "N/D", "Linea": line,
                     "% Over 5G": "ERR", "% Over 10G": "ERR",
                     "% Over Stagione": "ERR", "% Under Stagione": "ERR", "% Push Stagione": "ERR",
                 })
                 progress.progress((i + 1) / len(df_in))
                 continue
 
+            # 👇 squadra direttamente dal gamelog
+            team = "N/D"
+            if "TEAM_ABBREVIATION" in glog.columns and not glog.empty:
+                try:
+                    team = str(glog["TEAM_ABBREVIATION"].iloc[0])
+                except Exception:
+                    team = "N/D"
+
             col = metric_map[metric_choice]
+
             # Ultime 5/10 cross-stagione
             last5 = get_last_n_games_cross_seasons(pid, 5, "Totale")
             last10 = get_last_n_games_cross_seasons(pid, 10, "Totale")
@@ -425,7 +419,7 @@ with tab_batch:
 
             results.append({
                 "Giocatore": player_name,
-                "Squadra": roster_map.get(pid, "N/D"),
+                "Squadra": team,
                 "Linea": line,
                 "% Over 5G": f"{p5}%",
                 "% Over 10G": f"{p10}%",
@@ -592,13 +586,16 @@ with tab_bet365:
 
             # Download
             csv_bytes = df_ext.to_csv(index=False, encoding="utf-8").encode("utf-8")
-            xlsx_bytes = to_excel_bytes(df_ext)
+            bio_xlsx = io.BytesIO()
+            with pd.ExcelWriter(bio_xlsx, engine="openpyxl") as writer:
+                df_ext.to_excel(writer, index=False, sheet_name="estratto")
+            bio_xlsx.seek(0)
 
             c1, c2 = st.columns(2)
             with c1:
                 st.download_button("⬇️ Scarica CSV", data=csv_bytes, file_name="bet365_estratto.csv",
                                    mime="text/csv", use_container_width=True)
             with c2:
-                st.download_button("⬇️ Scarica Excel", data=xlsx_bytes, file_name="bet365_estratto.xlsx",
+                st.download_button("⬇️ Scarica Excel", data=bio_xlsx.read(), file_name="bet365_estratto.xlsx",
                                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                    use_container_width=True)

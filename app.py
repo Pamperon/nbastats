@@ -232,7 +232,7 @@ def plot_bar(df: pd.DataFrame, col: str, line: float, title: str, rotate: int = 
         ax.text(b.get_x() + b.get_width()/2, b.get_height() + 0.3, f"{values.iloc[i]:.0f}",
                 ha="center", va="bottom", fontsize=8, color="#e5e7eb")
 
-    ax.axhline(line, color="#9CA3AF", linestyle="--", linewidth=1.2", label=f"Linea {line:g}")
+    ax.axhline(line, color="#9CA3AF", linestyle="--", linewidth=1.2, label=f"Linea {line:g}")
 
     fig.patch.set_facecolor("#0b0f14"); ax.set_facecolor("#121821")
     ax.tick_params(colors="#e5e7eb", labelsize=9); ax.title.set_color("#e5e7eb")

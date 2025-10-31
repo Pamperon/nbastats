@@ -1,4 +1,5 @@
 # app.py — NBA Stats (centrato/compatto + linea .5 step 1 + vs avversario esteso)
+# Aggiornamento: su "Intera stagione" mostra valori sopra le barre e date sotto (come per 5/10)
 
 import math
 import datetime as dt
@@ -371,7 +372,6 @@ with tab_single:
             # --- Linea: solo .5, scatti di 1 ---
             defaults = {"PTS": 20.5, "AST": 5.5, "REB": 6.5, "PAR": 30.5}
             default_line = defaults[col]
-            # Invito a muoversi di 1 con offset .5; format una cifra decimale
             line_raw = st.number_input(
                 f"🎯 Inserisci la linea {m.lower()}",
                 min_value=0.0, max_value=120.0, value=default_line, step=1.0, format="%.1f",
@@ -398,9 +398,9 @@ with tab_single:
                 plot_bar(dplot, col, line, title, show_vals=show_vals, rotate=45, compact=False)
 
             else:
-                # Intera stagione: SOLO stagione corrente
+                # Intera stagione: SOLO stagione corrente — ora con etichette e date visibili
                 title = f"{sel['full_name']} | Intera stagione — {m}"
-                plot_bar(df_cur, col, line, title, show_vals=show_vals, rotate=0, compact=True)
+                plot_bar(df_cur, col, line, title, show_vals=True, rotate=45, compact=False)
 
             # --- Statistiche ---
             st.subheader(f"📊 Statistiche {m.lower()}")

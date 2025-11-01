@@ -1,7 +1,6 @@
-# app.py — NBA Stats + Bet365 Extractor (robusto: import lazy di nba_api e BeautifulSoup)
-# - Import lazy per evitare crash all'avvio su Streamlit Cloud
-# - Messaggi d’errore chiari nelle tab se una dipendenza manca
-# - Batch: squadra dal TEAM_ABBREVIATION (niente teams_roster_map)
+# app.py — NBA Stats + Bet365 Extractor (robusto: import lazy di nba_api + bs4)
+# - Import lazy via importlib (nba_api) + fallback parser per bs4
+# - Batch: squadra da TEAM_ABBREVIATION (no teams_roster_map)
 # - Grafici: valori e date sempre visibili
 # - Ultime 5/10 cross-stagione; Intera stagione = solo stagione corrente
 # - Vs avversario: stagione corrente, precedente, carriera
@@ -50,12 +49,13 @@ HAS_BS4 = _has_module("bs4")
 HAS_LXML = _has_module("lxml")
 HAS_NBA = _has_module("nba_api")
 
+# (facoltativo) diagnostica rapida
 with st.expander("🧪 Diagnostica rapida"):
     import sys, platform
     st.write("**Python**:", sys.version)
     st.write("**Platform**:", platform.platform())
     try:
-        import importlib.metadata as ilmd  # py>=3.8
+        import importlib.metadata as ilmd
         pkgs = {}
         for p in ["streamlit","pandas","matplotlib","openpyxl","nba_api","beautifulsoup4","lxml","requests","urllib3"]:
             try:
@@ -95,30 +95,30 @@ def with_retry(fn, *args, attempts: int = 3, wait_secs: float = 0.8, **kwargs):
     raise last_exc
 
 def force_half(value: float, min_v: float = 0.0, max_v: float = 120.0) -> float:
+    """Forza un numero al formato N + 0.5 e rispetta i limiti."""
     v = math.floor(float(value)) + 0.5
     v = max(min_v + 0.5, min(v, max_v - 0.5))
     return v
 
-# -------------------- IMPORT LAZY nba_api --------------------
+# -------------------- IMPORT LAZY nba_api (via importlib) --------------------
 def _nba_import_ok() -> bool:
     return HAS_NBA
 
 def _players_module():
-    from nba_api.stats import static as static_mod
-    return static_mod.players
+    import importlib
+    return importlib.import_module("nba_api.stats.static.players")
 
 def _teams_module():
-    from nba_api.stats import static as static_mod
-    return static_mod.teams
+    import importlib
+    return importlib.import_module("nba_api.stats.static.teams")
 
 def _playergamelog_endpoint():
-    from nba_api.stats.endpoints import playergamelog
-    return playergamelog.PlayerGameLog
+    import importlib
+    return importlib.import_module("nba_api.stats.endpoints.playergamelog").PlayerGameLog
 
 # -------------------- CACHE --------------------
 @st.cache_data(ttl=3600)
 def cached_all_players() -> List[Dict]:
-    # lazy import qui dentro
     players_mod = _players_module()
     return players_mod.get_players()
 
@@ -306,7 +306,7 @@ def parse_over_under_layout(soup, market_filter: str):
 def parse_columns_layout(soup):
     rows = []
     fixture_el = soup.select_one(".src-FixtureSubGroupButton_Text")
-    fixture = _norm_text(fixture_el.get_text()) if fixture_el else ""
+    fixture = _norm_text(fix_el.get_text()) if (fix_el := fixture_el) else ""
     players_list = [_norm_text(e.get_text()) for e in soup.select(".srb-ParticipantLabelWithTeam_Name")]
     if not players_list: return rows
     columns = soup.select(".srb-HScrollPlaceColumnMarket")
@@ -365,11 +365,13 @@ with tab_batch:
 
         for i, row in df_in.iterrows():
             player_name = str(row["Giocatore"])
-            # conversione robusta della linea (accetta "22,5")
-            try: line = float(row["Linea"])
+            try:
+                line = float(row["Linea"])
             except Exception:
-                try: line = float(str(row["Linea"]).replace(",", "."))
-                except Exception: line = 0.0
+                try:
+                    line = float(str(row["Linea"]).replace(",", "."))
+                except Exception:
+                    line = 0.0
 
             pid = find_player_id_by_name(player_name)
 

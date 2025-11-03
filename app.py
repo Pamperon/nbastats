@@ -1,7 +1,7 @@
 # app.py — NBA Stats + Bet365 (versione semplificata / robusta + piccoli ritocchi UI)
 # - Batch: output = Giocatore, Linea, Over 5 giornate, Over 10 giornate, Over intera stagione
 # - Singolo: nessun riferimento al Push (solo Over/Under)
-# - Bet365: solo mercato "Più di", deduplicazione sempre attiva
+# - Bet365: solo mercato "Più di", output solo Giocatore/Linea, deduplicato, download solo Excel
 # - Batch / 5-10 gare: SOLO stagione corrente (più stabile)
 # - Vs avversario: corrente, precedente, "carriera" dal 2015
 
@@ -484,7 +484,7 @@ with tab_single:
             )
             line = force_half(line_raw)
 
-            # Grafico — SOLO stagione corrente (versione stabile)
+            # Grafico — SOLO stagione corrente
             st.subheader("📈 Grafico")
             chart_range = st.selectbox("Intervallo", ["Ultime 5", "Ultime 10", "Intera stagione"])
             combo_cur = df_cur.sort_values("GAME_DATE", ascending=False)
@@ -550,10 +550,10 @@ with tab_single:
 
 # ==================== TAB: BET365 EXTRACTOR ====================
 with tab_bet365:
-    st.subheader("🧩 Estrazione Bet365 (Più di → Excel/CSV)")
+    st.subheader("🧩 Estrazione Bet365 (Più di → Excel)")
     st.caption(
-        "Incolla o carica l’HTML Bet365. Estrae **Giocatore, Linea, Quota** "
-        "per il mercato **Più di** (Over). Deduplicazione automatica."
+        "Incolla o carica l’HTML Bet365. Estrae e deduplica **Giocatore, Linea** "
+        "per il mercato **Più di** (Over)."
     )
 
     tab_file, tab_paste = st.tabs(["📁 Carica file HTML/TXT", "📋 Incolla HTML"])
@@ -580,35 +580,27 @@ with tab_bet365:
         with st.spinner("Estrazione in corso..."):
             df_ext = extract_bet365(html_content)
 
-            # Deduplicazione SEMPRE attiva
             if not df_ext.empty:
-                df_ext = df_ext.drop_duplicates(
-                    subset=["Fixture", "Player", "Line", "Odds"]
-                ).reset_index(drop=True)
+                # Riduci a solo Giocatore / Linea
+                df_out = df_ext[["Player", "Line"]].copy()
+                df_out = df_out.rename(columns={"Player": "Giocatore", "Line": "Linea"})
+                # Deduplicazione per Giocatore + Linea
+                df_out = df_out.drop_duplicates(subset=["Giocatore", "Linea"]).reset_index(drop=True)
+            else:
+                df_out = pd.DataFrame(columns=["Giocatore", "Linea"])
 
-        if df_ext.empty:
+        if df_out.empty:
             st.error("Nessun dato riconosciuto. Verifica di aver incollato l’HTML corretto.")
         else:
-            st.success(f"✅ Righe estratte: {len(df_ext)}")
-            st.dataframe(df_ext, use_container_width=True, hide_index=True)
+            st.success(f"✅ Righe estratte (univoche): {len(df_out)}")
+            st.dataframe(df_out, use_container_width=True, hide_index=True)
 
-            csv_bytes = df_ext.to_csv(index=False, encoding="utf-8").encode("utf-8")
-            xlsx_bytes = to_excel_bytes(df_ext)
+            xlsx_bytes = to_excel_bytes(df_out)
 
-            c1, c2 = st.columns(2)
-            with c1:
-                st.download_button(
-                    "⬇️ Scarica CSV",
-                    data=csv_bytes,
-                    file_name="bet365_estratto.csv",
-                    mime="text/csv",
-                    use_container_width=True,
-                )
-            with c2:
-                st.download_button(
-                    "⬇️ Scarica Excel",
-                    data=xlsx_bytes,
-                    file_name="bet365_estratto.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True,
-                )
+            st.download_button(
+                "⬇️ Scarica Excel",
+                data=xlsx_bytes,
+                file_name="bet365_giocatori_linee.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )

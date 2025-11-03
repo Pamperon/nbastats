@@ -3,7 +3,7 @@ pandas
 matplotlib
 nba_api
 requests
-openpyxl==3.1.5
-urllib3==2.2.3
-beautifulsoup4==4.12.3
-lxml==5.3.0
+openpyxl
+urllib3
+beautifulsoup4
+lxml

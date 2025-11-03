@@ -1,10 +1,7 @@
-# app.py — NBA Stats + Bet365 (versione stabile, senza retry lenti)
-# - Nessun with_retry: chiamate nba_api dirette (come nella versione che ti funzionava)
+# app.py — NBA Stats + Bet365 (versione semplificata / robusta)
+# - Batch e "Ultime 5/10" usano SOLO la stagione corrente (come versione vecchia, più stabile)
+# - Stagione precedente + carriera usate SOLO nello storico vs avversario (su richiesta)
 # - show_spinner=False su tutte le cache (niente "Running get_player_gamelog(...)")
-# - Batch ottimizzato: 1 chiamata stagione corrente + 1 stagione precedente per giocatore
-# - Singolo ottimizzato: riusa corrente+precedente anche per grafico e stats
-# - "Ultime 5/10" cross-stagione; "Intera stagione" = solo stagione corrente
-# - Vs avversario: corrente, precedente, carriera
 # - Tab Bet365 per estrazione HTML
 
 import math
@@ -113,9 +110,11 @@ def get_player_gamelog(player_id: int, season: str = CURRENT_SEASON) -> pd.DataF
     return df.sort_values("GAME_DATE", ascending=False)
 
 @st.cache_data(ttl=6 * 3600, show_spinner=False)
-def get_player_full_history(player_id: int, start_year: int = 2000) -> pd.DataFrame:
+def get_player_full_history(player_id: int, start_year: int = 2015) -> pd.DataFrame:
+    """Carriera dal 2015 in poi (limitiamo per ridurre le chiamate)."""
     frames = []
-    for year in range(start_year, dt.date.today().year + 1):
+    current_year = dt.date.today().year
+    for year in range(start_year, current_year + 1):
         season = f"{year}-{str(year + 1)[-2:]}"
         try:
             df = playergamelog.PlayerGameLog(
@@ -126,7 +125,7 @@ def get_player_full_history(player_id: int, start_year: int = 2000) -> pd.DataFr
                 df[c] = pd.to_numeric(df[c], errors="coerce")
             df["PAR"] = df["PTS"] + df["AST"] + df["REB"]
             frames.append(df)
-            time.sleep(0.15)
+            time.sleep(0.1)
         except Exception:
             continue
     if not frames:
@@ -333,7 +332,7 @@ with tab_batch:
     st.subheader("📥 Carica file Excel per analisi batch")
     st.caption(
         f"Il file deve contenere le colonne **Giocatore** e **Linea**. "
-        f"Stagione corrente: **{CURRENT_SEASON}** (Regular Season)."
+        f"Stagione corrente: **{CURRENT_SEASON}** (Regular Season, niente cross-stagione)."
     )
 
     metric_choice = st.radio(
@@ -361,14 +360,12 @@ with tab_batch:
         results = []
         progress = st.progress(0)
 
-        # cache locale per questo run: (pid, season) -> DataFrame
-        local_cache: Dict[Tuple[int, str], pd.DataFrame] = {}
+        local_cache: Dict[int, pd.DataFrame] = {}
 
-        def get_gl(pid: int, season: str) -> pd.DataFrame:
-            key = (pid, season)
-            if key not in local_cache:
-                local_cache[key] = get_player_gamelog(pid, season=season)
-            return local_cache[key]
+        def get_gl_cur(pid: int) -> pd.DataFrame:
+            if pid not in local_cache:
+                local_cache[pid] = get_player_gamelog(pid, season=CURRENT_SEASON)
+            return local_cache[pid]
 
         for i, row in df_in.iterrows():
             player_name = str(row["Giocatore"])
@@ -392,7 +389,7 @@ with tab_batch:
                 continue
 
             try:
-                glog_cur = get_gl(pid, CURRENT_SEASON)  # stagione corrente
+                glog_cur = get_gl_cur(pid)  # stagione corrente
             except Exception:
                 results.append({
                     "Giocatore": player_name, "Squadra": "N/D", "Linea": line,
@@ -402,23 +399,14 @@ with tab_batch:
                 progress.progress((i + 1) / len(df_in))
                 continue
 
-            # squadra dal gamelog corrente
             team = "N/D"
             if "TEAM_ABBREVIATION" in glog_cur.columns and not glog_cur.empty:
                 team = str(glog_cur["TEAM_ABBREVIATION"].iloc[0])
 
             col = metric_map[metric_choice]
 
-            # Ultime 5/10 cross-stagione (Totale) usando corrente+precedente solo una volta
-            try:
-                glog_prev = get_gl(pid, prev_season(CURRENT_SEASON))
-            except Exception:
-                glog_prev = pd.DataFrame()
-
-            cur_tot = filter_game_type(glog_cur, "Totale")
-            prev_tot = filter_game_type(glog_prev, "Totale") if not glog_prev.empty else pd.DataFrame()
-            combo = pd.concat([cur_tot, prev_tot], ignore_index=True).sort_values("GAME_DATE", ascending=False)
-
+            # Ultime 5/10 SOLO stagione corrente (come versione vecchia)
+            combo = glog_cur.sort_values("GAME_DATE", ascending=False)
             last5 = combo.head(5)
             last10 = combo.head(10)
 
@@ -492,16 +480,6 @@ with tab_single:
 
             df_cur = filter_game_type(df_cur_raw, game_type)
 
-            # Pre-calcolo anche la precedente una sola volta
-            try:
-                df_prev_raw = get_player_gamelog(pid, season=prev_season(CURRENT_SEASON))
-                df_prev = filter_game_type(df_prev_raw, game_type)
-            except Exception:
-                df_prev_raw = pd.DataFrame()
-                df_prev = pd.DataFrame()
-
-            combo = pd.concat([df_cur, df_prev], ignore_index=True).sort_values("GAME_DATE", ascending=False)
-
             # Linea: solo .5, step 1
             defaults = {"PTS": 20.5, "AST": 5.5, "REB": 6.5, "PAR": 30.5}
             default_line = defaults[col]
@@ -513,57 +491,69 @@ with tab_single:
             )
             line = force_half(line_raw)
 
-            # Grafico
+            # Grafico — SOLO stagione corrente (versione stabile)
             st.subheader("📈 Grafico")
             chart_range = st.selectbox("Intervallo", ["Ultime 5", "Ultime 10", "Intera stagione"])
+            combo_cur = df_cur.sort_values("GAME_DATE", ascending=False)
             if chart_range == "Ultime 5":
-                dplot = combo.head(5)
+                dplot = combo_cur.head(5)
                 title = f"{sel['full_name']} | Ultime 5 — {m}"
-                plot_bar(dplot, col, line, title, rotate=45)
             elif chart_range == "Ultime 10":
-                dplot = combo.head(10)
+                dplot = combo_cur.head(10)
                 title = f"{sel['full_name']} | Ultime 10 — {m}"
-                plot_bar(dplot, col, line, title, rotate=45)
             else:
+                dplot = df_cur
                 title = f"{sel['full_name']} | Intera stagione — {m}"
-                plot_bar(df_cur, col, line, title, rotate=45)
+            plot_bar(dplot, col, line, title, rotate=45)
 
-            # Statistiche
+            # Statistiche — 5/10 SOLO stagione corrente
             st.subheader(f"📊 Statistiche {m.lower()}")
-            last5 = combo.head(5)
-            last10 = combo.head(10)
+            last5 = combo_cur.head(5)
+            last10 = combo_cur.head(10)
 
             p5, o5, t5 = percent_over(last5[col], line)
             p10, o10, t10 = percent_over(last10[col], line)
             pall_over, pall_under, pall_push, oc, uc, pc = calculate_over_under_push(df_cur[col], line)
 
-            st.write(f"**Ultime 5 (cross-stagione)**: {p5}% over ({o5}/{t5})")
-            st.write(f"**Ultime 10 (cross-stagione)**: {p10}% over ({o10}/{t10})")
+            st.write(f"**Ultime 5 (stagione corrente)**: {p5}% over ({o5}/{t5})")
+            st.write(f"**Ultime 10 (stagione corrente)**: {p10}% over ({o10}/{t10})")
             st.write(
                 f"**Intera stagione (corrente)**: Over {pall_over}% ({oc}/{len(df_cur)}), "
                 f"Under {pall_under}% ({uc}/{len(df_cur)}), Push {pall_push}% ({pc}/{len(df_cur)})"
             )
 
-            # Vs avversario
+            # Vs avversario (corrente, precedente, "carriera" limitata dal 2015)
             st.subheader("🆚 Storico vs avversario")
             team_abbrs = sorted({t["abbreviation"] for t in cached_teams()})
             opp = st.selectbox("Seleziona squadra avversaria", ["—"] + team_abbrs)
 
             if opp != "—":
+                # Corrente
                 df_vs_cur = df_cur[df_cur["MATCHUP"].str.contains(opp, na=False)]
                 pov_cur, ovc_cur, totc_cur = percent_over(df_vs_cur[col], line)
 
+                # Precedente
+                prev = prev_season(CURRENT_SEASON)
+                try:
+                    df_prev_raw = get_player_gamelog(pid, season=prev)
+                    df_prev = filter_game_type(df_prev_raw, game_type)
+                except Exception:
+                    df_prev = pd.DataFrame()
                 df_vs_prev = df_prev[df_prev["MATCHUP"].str.contains(opp, na=False)]
                 pov_prev, ovc_prev, totc_prev = percent_over(df_vs_prev[col], line)
 
-                df_hist = get_player_full_history(pid)
-                df_hist = filter_game_type(df_hist, game_type)
+                # "Carriera" dal 2015
+                try:
+                    df_hist = get_player_full_history(pid, start_year=2015)
+                    df_hist = filter_game_type(df_hist, game_type)
+                except Exception:
+                    df_hist = pd.DataFrame()
                 df_vs_all = df_hist[df_hist["MATCHUP"].str.contains(opp, na=False)]
                 pov_all, ovc_all, totc_all = percent_over(df_vs_all[col], line)
 
                 st.write(f"**Stagione corrente vs {opp}**: {pov_cur}% over ({ovc_cur}/{totc_cur})")
                 st.write(f"**Stagione precedente vs {opp}**: {pov_prev}% over ({ovc_prev}/{totc_prev})")
-                st.write(f"**Carriera vs {opp}**: {pov_all}% over ({ovc_all}/{totc_all})")
+                st.write(f"**Carriera (dal 2015) vs {opp}**: {pov_all}% over ({ovc_all}/{totc_all})")
 
 # ==================== TAB: BET365 EXTRACTOR ====================
 with tab_bet365:

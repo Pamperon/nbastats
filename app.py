@@ -1,9 +1,10 @@
-# app.py — NBA Stats + Bet365 (versione semplificata / robusta + piccoli ritocchi UI)
-# - Batch: output = Giocatore, Linea, Over 5 giornate, Over 10 giornate, Over intera stagione
-# - Singolo: nessun riferimento al Push (solo Over/Under)
-# - Bet365: solo mercato "Più di", output solo Giocatore/Linea, deduplicato, download solo Excel
-# - Batch / 5-10 gare: SOLO stagione corrente (più stabile)
+# app.py — NBA Stats + Bet365 (versione robusta)
+# - Batch: Giocatore, Linea, Over 5 giornate, Over 10 giornate, Over intera stagione
+# - Singolo: nessun Push, solo Over/Under
+# - Bet365: solo mercato "Più di", output Giocatore/Linea, deduplicato, solo Excel
+# - Batch / 5-10 gare: SOLO stagione corrente
 # - Vs avversario: corrente, precedente, "carriera" dal 2015
+# - get_player_gamelog: mini-retry (max 3 tentativi) per timeout stats.nba.com
 
 import math
 import datetime as dt
@@ -82,33 +83,51 @@ def cached_teams() -> List[Dict]:
     return teams.get_teams()
 
 def find_player_id_by_name(player_name: str) -> Optional[int]:
-    custom_map = {"pj washington": "p.j. washington", "ron holland ii": "ronald holland ii"}
+    custom_map = {
+        "pj washington": "p.j. washington",
+        "ron holland ii": "ronald holland ii",
+    }
     norm_in = normalize_name(player_name)
     candidate = custom_map.get(norm_in, player_name)
 
-    all_players = cached_all_players()
+    all_p = cached_all_players()
     norm_candidate = normalize_name(candidate)
 
     # match esatto
-    for p in all_players:
+    for p in all_p:
         if normalize_name(p["full_name"]) == norm_candidate:
             return p["id"]
     # match parziale
-    for p in all_players:
+    for p in all_p:
         if norm_candidate in normalize_name(p["full_name"]):
             return p["id"]
     return None
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def get_player_gamelog(player_id: int, season: str = CURRENT_SEASON) -> pd.DataFrame:
-    df = playergamelog.PlayerGameLog(
-        player_id=player_id, season=season, season_type_all_star="Regular Season"
-    ).get_data_frames()[0]
-    df["GAME_DATE"] = pd.to_datetime(df["GAME_DATE"], errors="coerce")
-    for c in ("PTS", "AST", "REB"):
-        df[c] = pd.to_numeric(df[c], errors="coerce")
-    df["PAR"] = df["PTS"] + df["AST"] + df["REB"]
-    return df.sort_values("GAME_DATE", ascending=False)
+    """
+    Gamelog stagione regolare per un giocatore.
+    Mini-retry interno per gestire timeout temporanei di stats.nba.com.
+    """
+    last_exc = None
+    for attempt in range(3):  # max 3 tentativi
+        try:
+            df = playergamelog.PlayerGameLog(
+                player_id=player_id,
+                season=season,
+                season_type_all_star="Regular Season",
+            ).get_data_frames()[0]
+            df["GAME_DATE"] = pd.to_datetime(df["GAME_DATE"], errors="coerce")
+            for c in ("PTS", "AST", "REB"):
+                df[c] = pd.to_numeric(df[c], errors="coerce")
+            df["PAR"] = df["PTS"] + df["AST"] + df["REB"]
+            return df.sort_values("GAME_DATE", ascending=False)
+        except Exception as e:
+            last_exc = e
+            if attempt < 2:
+                time.sleep(2)  # piccola pausa solo sui fallimenti
+            else:
+                raise last_exc
 
 @st.cache_data(ttl=6 * 3600, show_spinner=False)
 def get_player_full_history(player_id: int, start_year: int = 2015) -> pd.DataFrame:
@@ -151,8 +170,10 @@ def calculate_over_under_push(series: pd.Series, line: float):
     under_c = int((s < line).sum())
     push_c = int((s == line).sum())
     total = len(s)
-    return (round(100 * over_c / total, 1), round(100 * under_c / total, 1),
-            round(100 * push_c / total, 1), over_c, under_c, push_c)
+    return (round(100 * over_c / total, 1),
+            round(100 * under_c / total, 1),
+            round(100 * push_c / total, 1),
+            over_c, under_c, push_c)
 
 def filter_game_type(df: pd.DataFrame, game_type: str) -> pd.DataFrame:
     """Filtra per Casa/Ospite se possibile; se manca MATCHUP, restituisce df vuoto per i filtri."""
@@ -187,7 +208,7 @@ def plot_bar(df: pd.DataFrame, col: str, line: float, title: str,
     # Valori sempre visibili
     for i, bar in enumerate(bars):
         ax.text(
-            bar.get_x() + bar.get_width()/2,
+            bar.get_x() + bar.get_width() / 2,
             bar.get_height() + 0.3,
             f"{values.iloc[i]:.0f}",
             ha="center", va="bottom", fontsize=8, color="#e5e7eb"
@@ -276,7 +297,7 @@ def parse_over_under_layout(soup: BeautifulSoup, market_filter: str = "over"):
                     "Player": players_list[i],
                     "Market": market_name,
                     "Line": line,
-                    "Odds": odds
+                    "Odds": odds,
                 })
     return rows
 
@@ -416,7 +437,7 @@ with tab_batch:
 
             p5, _, _ = percent_over(last5[col], line)
             p10, _, _ = percent_over(last10[col], line)
-            over_all, under_all, _, oc, uc, _ = calculate_over_under_push(glog_cur[col], line)
+            over_all, _, _, _, _, _ = calculate_over_under_push(glog_cur[col], line)
 
             results.append({
                 "Giocatore": player_name,
@@ -507,7 +528,7 @@ with tab_single:
                 title = f"{sel['full_name']} | Intera stagione — {m}"
             plot_bar(dplot, col, line, title, rotate=45)
 
-            # Statistiche — 5/10 SOLO stagione corrente, niente Push
+            # Statistiche — 5/10 SOLO stagione corrente, niente Push esplicito
             st.subheader(f"📊 Statistiche {m.lower()}")
             last5 = combo_cur.head(5)
             last10 = combo_cur.head(10)

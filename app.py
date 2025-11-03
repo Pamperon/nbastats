@@ -1,8 +1,9 @@
-# app.py — NBA Stats + Bet365 (versione semplificata / robusta)
-# - Batch e "Ultime 5/10" usano SOLO la stagione corrente (come versione vecchia, più stabile)
-# - Stagione precedente + carriera usate SOLO nello storico vs avversario (su richiesta)
-# - show_spinner=False su tutte le cache (niente "Running get_player_gamelog(...)")
-# - Tab Bet365 per estrazione HTML
+# app.py — NBA Stats + Bet365 (versione semplificata / robusta + piccoli ritocchi UI)
+# - Batch: output = Giocatore, Linea, Over 5 giornate, Over 10 giornate, Over intera stagione
+# - Singolo: nessun riferimento al Push (solo Over/Under)
+# - Bet365: solo mercato "Più di", deduplicazione sempre attiva
+# - Batch / 5-10 gare: SOLO stagione corrente (più stabile)
+# - Vs avversario: corrente, precedente, "carriera" dal 2015
 
 import math
 import datetime as dt
@@ -39,7 +40,7 @@ st.markdown(
 st.title("🏀 NBA Stats — Props-style Analyzer")
 st.caption(
     "Ricerca giocatore, percentuali Over/Under, grafico a barre, filtri casa/trasferta, "
-    "storico vs avversario. + 🧩 Estrazione Bet365 HTML."
+    "storico vs avversario. + 🧩 Estrazione Bet365 HTML (Più di)."
 )
 
 # -------------------- UTILITIES (NBA) --------------------
@@ -216,11 +217,6 @@ def _contains_over(label: str) -> bool:
     lab_noaccent = unicodedata.normalize("NFKD", lab).encode("ascii", "ignore").decode("ascii")
     return ("piu di" in lab_noaccent) or ("over" in lab_noaccent)
 
-def _contains_under(label: str) -> bool:
-    lab = label.lower()
-    lab_noaccent = unicodedata.normalize("NFKD", lab).encode("ascii", "ignore").decode("ascii")
-    return ("meno di" in lab_noaccent) or ("under" in lab_noaccent)
-
 def _to_float_odds(x: str):
     if x is None:
         return None
@@ -236,7 +232,7 @@ def _to_float_odds(x: str):
                 return None
         return None
 
-def parse_over_under_layout(soup: BeautifulSoup, market_filter: str):
+def parse_over_under_layout(soup: BeautifulSoup, market_filter: str = "over"):
     rows = []
     pods = soup.select(".gl-MarketGroupPod.src-FixtureSubGroup")
     if not pods:
@@ -251,9 +247,8 @@ def parse_over_under_layout(soup: BeautifulSoup, market_filter: str):
             header_el = market.select_one(".gl-MarketColumnHeader")
             market_name = _norm_text(header_el.get_text() if header_el else "")
 
-            if market_filter == "over" and not _contains_over(market_name):
-                continue
-            if market_filter == "under" and not _contains_under(market_name):
+            # consideriamo solo "Più di"/Over
+            if not _contains_over(market_name):
                 continue
 
             parts = market.select(".gl-ParticipantCenteredStacked.gl-Participant_General")
@@ -278,6 +273,7 @@ def parse_over_under_layout(soup: BeautifulSoup, market_filter: str):
     return rows
 
 def parse_columns_layout(soup: BeautifulSoup):
+    """Layout a colonne (0, 5, 10, ...) — qui non c'è distinzione Più di / Meno di."""
     rows = []
     fixture_el = soup.select_one(".src-FixtureSubGroupButton_Text")
     fixture = _norm_text(fix_el.get_text()) if (fix_el := fixture_el) else ""
@@ -305,9 +301,9 @@ def parse_columns_layout(soup: BeautifulSoup):
             })
     return rows
 
-def extract_bet365(html: str, market_filter: str = "over") -> pd.DataFrame:
+def extract_bet365(html: str) -> pd.DataFrame:
     soup = BeautifulSoup(html, "lxml")
-    rows = parse_over_under_layout(soup, market_filter=market_filter)
+    rows = parse_over_under_layout(soup, market_filter="over")
     if not rows:
         rows = parse_columns_layout(soup)
     df = pd.DataFrame(rows, columns=["Fixture", "Player", "Market", "Line", "Odds"])
@@ -332,7 +328,7 @@ with tab_batch:
     st.subheader("📥 Carica file Excel per analisi batch")
     st.caption(
         f"Il file deve contenere le colonne **Giocatore** e **Linea**. "
-        f"Stagione corrente: **{CURRENT_SEASON}** (Regular Season, niente cross-stagione)."
+        f"Stagione corrente: **{CURRENT_SEASON}** (Regular Season, solo stagione attuale)."
     )
 
     metric_choice = st.radio(
@@ -381,9 +377,11 @@ with tab_batch:
 
             if pid is None:
                 results.append({
-                    "Giocatore": player_name, "Squadra": "N/D", "Linea": line,
-                    "% Over 5G": "N/D", "% Over 10G": "N/D",
-                    "% Over Stagione": "N/D", "% Under Stagione": "N/D", "% Push Stagione": "N/D",
+                    "Giocatore": player_name,
+                    "Linea": line,
+                    "Over 5 giornate": "N/D",
+                    "Over 10 giornate": "N/D",
+                    "Over intera stagione": "N/D",
                 })
                 progress.progress((i + 1) / len(df_in))
                 continue
@@ -392,37 +390,32 @@ with tab_batch:
                 glog_cur = get_gl_cur(pid)  # stagione corrente
             except Exception:
                 results.append({
-                    "Giocatore": player_name, "Squadra": "N/D", "Linea": line,
-                    "% Over 5G": "ERR", "% Over 10G": "ERR",
-                    "% Over Stagione": "ERR", "% Under Stagione": "ERR", "% Push Stagione": "ERR",
+                    "Giocatore": player_name,
+                    "Linea": line,
+                    "Over 5 giornate": "ERR",
+                    "Over 10 giornate": "ERR",
+                    "Over intera stagione": "ERR",
                 })
                 progress.progress((i + 1) / len(df_in))
                 continue
 
-            team = "N/D"
-            if "TEAM_ABBREVIATION" in glog_cur.columns and not glog_cur.empty:
-                team = str(glog_cur["TEAM_ABBREVIATION"].iloc[0])
-
             col = metric_map[metric_choice]
 
-            # Ultime 5/10 SOLO stagione corrente (come versione vecchia)
+            # Ultime 5/10 SOLO stagione corrente
             combo = glog_cur.sort_values("GAME_DATE", ascending=False)
             last5 = combo.head(5)
             last10 = combo.head(10)
 
             p5, _, _ = percent_over(last5[col], line)
             p10, _, _ = percent_over(last10[col], line)
-            over_all, under_all, push_all, oc, uc, pc = calculate_over_under_push(glog_cur[col], line)
+            over_all, under_all, _, oc, uc, _ = calculate_over_under_push(glog_cur[col], line)
 
             results.append({
                 "Giocatore": player_name,
-                "Squadra": team,
                 "Linea": line,
-                "% Over 5G": f"{p5}%",
-                "% Over 10G": f"{p10}%",
-                "% Over Stagione": f"{over_all}%",
-                "% Under Stagione": f"{under_all}%",
-                "% Push Stagione": f"{push_all}%",
+                "Over 5 giornate": f"{p5}%",
+                "Over 10 giornate": f"{p10}%",
+                "Over intera stagione": f"{over_all}%",
             })
             progress.progress((i + 1) / len(df_in))
 
@@ -506,23 +499,23 @@ with tab_single:
                 title = f"{sel['full_name']} | Intera stagione — {m}"
             plot_bar(dplot, col, line, title, rotate=45)
 
-            # Statistiche — 5/10 SOLO stagione corrente
+            # Statistiche — 5/10 SOLO stagione corrente, niente Push
             st.subheader(f"📊 Statistiche {m.lower()}")
             last5 = combo_cur.head(5)
             last10 = combo_cur.head(10)
 
             p5, o5, t5 = percent_over(last5[col], line)
             p10, o10, t10 = percent_over(last10[col], line)
-            pall_over, pall_under, pall_push, oc, uc, pc = calculate_over_under_push(df_cur[col], line)
+            pall_over, pall_under, _, oc, uc, _ = calculate_over_under_push(df_cur[col], line)
 
             st.write(f"**Ultime 5 (stagione corrente)**: {p5}% over ({o5}/{t5})")
             st.write(f"**Ultime 10 (stagione corrente)**: {p10}% over ({o10}/{t10})")
             st.write(
                 f"**Intera stagione (corrente)**: Over {pall_over}% ({oc}/{len(df_cur)}), "
-                f"Under {pall_under}% ({uc}/{len(df_cur)}), Push {pall_push}% ({pc}/{len(df_cur)})"
+                f"Under {pall_under}% ({uc}/{len[df_cur]})"
             )
 
-            # Vs avversario (corrente, precedente, "carriera" limitata dal 2015)
+            # Vs avversario (corrente, precedente, "carriera" dal 2015)
             st.subheader("🆚 Storico vs avversario")
             team_abbrs = sorted({t["abbreviation"] for t in cached_teams()})
             opp = st.selectbox("Seleziona squadra avversaria", ["—"] + team_abbrs)
@@ -557,17 +550,10 @@ with tab_single:
 
 # ==================== TAB: BET365 EXTRACTOR ====================
 with tab_bet365:
-    st.subheader("🧩 Estrazione Bet365 (HTML → Excel/CSV)")
+    st.subheader("🧩 Estrazione Bet365 (Più di → Excel/CSV)")
     st.caption(
-        "Incolla o carica l’HTML Bet365. Estrae **Giocatore, Linea, Quota**. "
-        "Supporto per Over/Under e layout a colonne (0, 5, 10, ...)."
-    )
-
-    market_opt = st.selectbox("Mercato da estrarre", ["Più di", "Meno di", "Entrambi"], index=0)
-    market_val = {"Più di": "over", "Meno di": "under", "Entrambi": "both"}[market_opt]
-    deduplicate = st.checkbox(
-        "Rimuovi duplicati (per Fixture+Player+Line+Odds)",
-        value=(market_val != "both"),
+        "Incolla o carica l’HTML Bet365. Estrae **Giocatore, Linea, Quota** "
+        "per il mercato **Più di** (Over). Deduplicazione automatica."
     )
 
     tab_file, tab_paste = st.tabs(["📁 Carica file HTML/TXT", "📋 Incolla HTML"])
@@ -592,11 +578,10 @@ with tab_bet365:
             st.stop()
 
         with st.spinner("Estrazione in corso..."):
-            df_ext = extract_bet365(html_content, market_filter=market_val)
-            if df_ext.empty and market_val != "both":
-                df_ext = extract_bet365(html_content, market_filter="both")
+            df_ext = extract_bet365(html_content)
 
-            if deduplicate and not df_ext.empty:
+            # Deduplicazione SEMPRE attiva
+            if not df_ext.empty:
                 df_ext = df_ext.drop_duplicates(
                     subset=["Fixture", "Player", "Line", "Odds"]
                 ).reset_index(drop=True)

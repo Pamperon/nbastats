@@ -512,7 +512,7 @@ with tab_single:
             st.write(f"**Ultime 10 (stagione corrente)**: {p10}% over ({o10}/{t10})")
             st.write(
                 f"**Intera stagione (corrente)**: Over {pall_over}% ({oc}/{len(df_cur)}), "
-                f"Under {pall_under}% ({uc}/{len[df_cur]})"
+                f"Under {pall_under}% ({uc}/{len(df_cur)})"
             )
 
             # Vs avversario (corrente, precedente, "carriera" dal 2015)

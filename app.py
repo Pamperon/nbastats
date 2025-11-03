@@ -1,13 +1,18 @@
-# app.py — NBA Stats (versione senza tab Bet365)
+# app.py — NBA Stats (senza tab Bet365) con retry, headers e cache su disco per nba_api
+# - Gestione timeouts / blocchi con headers browser-like e backoff
+# - Cache su disco per ogni (player, stagione) in /tmp/nba_cache
 # - Ultime 5/10 cross-stagione; Intera stagione = solo stagione corrente
-# - Grafici compatti con valori e date sempre visibili
-# - Linea a .5 con step 1
+# - Grafico compatto, valori/date always-on, linea .5 (step 1)
 # - Vs avversario: stagione corrente, precedente, carriera
-# - Batch da Excel con % over 5/10 (cross) e over/under/push su stagione corrente
+# ------------------------------------------------------------
 
 import math
 import datetime as dt
 import time
+import json
+import hashlib
+import os
+from pathlib import Path
 from typing import Dict, Optional, Tuple, List
 
 import matplotlib.pyplot as plt
@@ -19,7 +24,6 @@ from nba_api.stats.endpoints import playergamelog
 
 # --------------- CONFIG UI ---------------
 st.set_page_config(page_title="NBA Stats", layout="centered")
-
 st.markdown(
     """
     <style>
@@ -29,9 +33,57 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
-
 st.title("🏀 NBA Stats — Props-style Analyzer")
 st.caption("Ricerca giocatore, percentuali Over/Under, grafico a barre, filtri casa/trasferta, storico vs avversario.")
+
+# --------------- HARDENING nba_api (headers + timeout) ---------------
+try:
+    from nba_api.stats.library.http import NBAStatsHTTP
+    # timeout più basso per far scattare i retry (default è alto)
+    NBAStatsHTTP.timeout = 8
+    # headers “da browser” (spesso evitano Cloudflare challenge)
+    NBAStatsHTTP.headers.update({
+        "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) "
+                       "Chrome/120.0.0.0 Safari/537.36"),
+        "Referer": "https://www.nba.com/",
+        "Origin": "https://www.nba.com",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept": "application/json, text/plain, */*",
+        "Connection": "keep-alive",
+    })
+except Exception:
+    pass
+
+# --------------- DISK CACHE (riduce chiamate a stats.nba.com) ---------------
+CACHE_DIR = Path(os.getenv("NBA_CACHE_DIR", "/tmp/nba_cache"))
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+def _cache_key(prefix: str, **kwargs) -> Path:
+    payload = prefix + "|" + json.dumps(kwargs, sort_keys=True, default=str)
+    return CACHE_DIR / f"{prefix}_{hashlib.md5(payload.encode()).hexdigest()}.json"
+
+def _save_json(path: Path, obj: dict):
+    try:
+        path.write_text(json.dumps(obj), encoding="utf-8")
+    except Exception:
+        pass
+
+def _load_json(path: Path):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+def nba_with_retry(callable_fn, attempts=4, base_wait=0.8):
+    last = None
+    for i in range(attempts):
+        try:
+            return callable_fn()
+        except Exception as e:
+            last = e
+            time.sleep(base_wait * (2 ** i))  # backoff esponenziale
+    raise last
 
 # --------------- UTILS ---------------
 def normalize_name(name: str) -> str:
@@ -69,11 +121,11 @@ def force_half(value: float, min_v: float = 0.0, max_v: float = 120.0) -> float:
     return v
 
 # --------------- CACHE DATA ---------------
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=3600, show_spinner=False)
 def cached_all_players() -> List[Dict]:
     return players.get_players()
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=3600, show_spinner=False)
 def cached_teams() -> List[Dict]:
     return teams.get_teams()
 
@@ -93,36 +145,38 @@ def find_player_id_by_name(player_name: str) -> Optional[int]:
             return p["id"]
     return None
 
-@st.cache_data(ttl=1800)
+# --- get_player_gamelog con retry + cache su disco ---
+@st.cache_data(ttl=1800, show_spinner=False)
 def get_player_gamelog(player_id: int, season: str = CURRENT_SEASON) -> pd.DataFrame:
-    def _call():
-        return playergamelog.PlayerGameLog(
-            player_id=player_id, season=season, season_type_all_star="Regular Season"
-        ).get_data_frames()[0]
-    df = with_retry(_call)
+    ck = _cache_key("playergamelog", player_id=player_id, season=season)
+    cached = _load_json(ck)
+    if cached:
+        df = pd.DataFrame(cached)
+    else:
+        def _call():
+            return playergamelog.PlayerGameLog(
+                player_id=player_id, season=season, season_type_all_star="Regular Season"
+            ).get_data_frames()[0]
+        df = nba_with_retry(_call)  # retry rapido
+        _save_json(ck, df.to_dict(orient="records"))  # salvataggio su disco
+
     df["GAME_DATE"] = pd.to_datetime(df["GAME_DATE"], errors="coerce")
     for c in ("PTS", "AST", "REB"):
         df[c] = pd.to_numeric(df[c], errors="coerce")
     df["PAR"] = df["PTS"] + df["AST"] + df["REB"]
     return df.sort_values("GAME_DATE", ascending=False)
 
-@st.cache_data(ttl=6 * 3600)
+# --- history che riusa la cache stagionale sopra ---
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
 def get_player_full_history(player_id: int, start_year: int = 2000) -> pd.DataFrame:
     frames = []
     for year in range(start_year, dt.date.today().year + 1):
         season = f"{year}-{str(year + 1)[-2:]}"
         try:
-            def _call():
-                return playergamelog.PlayerGameLog(
-                    player_id=player_id, season=season, season_type_all_star="Regular Season"
-                ).get_data_frames()[0]
-            df = with_retry(_call)
-            df["GAME_DATE"] = pd.to_datetime(df["GAME_DATE"], errors="coerce")
-            for c in ("PTS", "AST", "REB"):
-                df[c] = pd.to_numeric(df[c], errors="coerce")
-            df["PAR"] = df["PTS"] + df["AST"] + df["REB"]
-            frames.append(df)
-            time.sleep(0.2)
+            df = get_player_gamelog(player_id, season=season)  # già retry+cache
+            if not df.empty:
+                frames.append(df)
+            time.sleep(0.15)  # micro pausa
         except Exception:
             continue
     if not frames:
@@ -317,9 +371,6 @@ with tab_batch:
         df_out = pd.DataFrame(results)
         st.dataframe(df_out, use_container_width=True, hide_index=True)
 
-        bio = pd.ExcelWriter  # for type hints only
-        bio_mem = st.download_button
-
         bio = io.BytesIO()
         with pd.ExcelWriter(bio, engine="openpyxl") as w:
             df_out.to_excel(w, index=False, sheet_name="risultati")
@@ -352,14 +403,6 @@ with tab_single:
             col_map = {"Punti": "PTS", "Assist": "AST", "Rimbalzi": "REB", "P+A+R": "PAR"}
             col = col_map[m]
 
-            try:
-                df_cur = get_player_gamelog(pid)  # stagione corrente
-            except Exception as e:
-                st.error(f"Errore nel recupero dati: {e}")
-                st.stop()
-
-            df_cur = filter_game_type(df_cur, game_type)
-
             # Linea .5 con step 1
             defaults = {"PTS": 20.5, "AST": 5.5, "REB": 6.5, "PAR": 30.5}
             line_raw = st.number_input(
@@ -368,6 +411,17 @@ with tab_single:
                 help="Si muove di 1 alla volta ed è sempre .5 (es. 20.5 → 21.5 → 22.5)."
             )
             line = force_half(line_raw)
+
+            # Chiamata con gestione errore chiara (timeout/CF block)
+            try:
+                df_cur = get_player_gamelog(pid)  # stagione corrente (retry+cache)
+            except Exception as e:
+                st.error("Impossibile contattare stats.nba.com dal server attuale. "
+                         "Prova più tardi o esegui l’app in locale/VPS diverso. "
+                         f"Dettagli: {e}")
+                st.stop()
+
+            df_cur = filter_game_type(df_cur, game_type)
 
             # Grafico
             st.subheader("📈 Grafico")

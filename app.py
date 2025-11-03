@@ -1,8 +1,9 @@
-# app.py — NBA Stats + Bet365 (versione veloce)
-# - Batch: Giocatore, Linea, Over 5, Over 10, Over intera stagione
-# - Singolo: nessun Push
+# app.py — NBA Stats + Bet365 (versione veloce + timeout)
+# - Batch: Giocatore, Linea, Over 5 giornate, Over 10 giornate, Over intera stagione
+# - Singolo: nessun Push, solo Over/Under
 # - Bet365: solo mercato "Più di", output Giocatore/Linea, deduplicato, solo Excel
-# - get_player_gamelog: singolo tentativo (più rapido)
+# - get_player_gamelog: timeout=5s (più rapido in caso di server lento)
+# - Batch usa cache locale per non richiamare lo stesso giocatore più volte
 
 import math
 import datetime as dt
@@ -43,7 +44,13 @@ st.caption(
 
 # -------------------- UTILITIES --------------------
 def normalize_name(name: str) -> str:
-    return unicodedata.normalize("NFKD", str(name)).encode("ASCII", "ignore").decode("utf-8").lower().strip()
+    return (
+        unicodedata.normalize("NFKD", str(name))
+        .encode("ASCII", "ignore")
+        .decode("utf-8")
+        .lower()
+        .strip()
+    )
 
 def season_string_for_today(today: Optional[dt.date] = None) -> str:
     d = today or dt.date.today()
@@ -53,11 +60,6 @@ def season_string_for_today(today: Optional[dt.date] = None) -> str:
         start = d.year - 1
     end = (start + 1) % 100
     return f"{start}-{end:02d}"
-
-def prev_season(season: str) -> str:
-    y1 = int(season[:4]) - 1
-    y2 = (y1 + 1) % 100
-    return f"{y1}-{y2:02d}"
 
 CURRENT_SEASON = season_string_for_today()
 
@@ -73,10 +75,6 @@ def force_half(value: float, min_v: float = 0.0, max_v: float = 120.0) -> float:
 @st.cache_data(ttl=3600, show_spinner=False)
 def cached_all_players() -> List[Dict]:
     return players.get_players()
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def cached_teams() -> List[Dict]:
-    return teams.get_teams()
 
 def find_player_id_by_name(player_name: str) -> Optional[int]:
     custom_map = {
@@ -97,13 +95,17 @@ def find_player_id_by_name(player_name: str) -> Optional[int]:
             return p["id"]
     return None
 
-# ✅ versione veloce: un solo tentativo
 @st.cache_data(ttl=1800, show_spinner=False)
 def get_player_gamelog(player_id: int, season: str = CURRENT_SEASON) -> pd.DataFrame:
+    """
+    Gamelog Regular Season con timeout breve (5s).
+    Se stats.nba.com non risponde entro 5s, alza eccezione.
+    """
     df = playergamelog.PlayerGameLog(
         player_id=player_id,
         season=season,
         season_type_all_star="Regular Season",
+        timeout=5,
     ).get_data_frames()[0]
 
     df["GAME_DATE"] = pd.to_datetime(df["GAME_DATE"], errors="coerce")
@@ -111,29 +113,6 @@ def get_player_gamelog(player_id: int, season: str = CURRENT_SEASON) -> pd.DataF
         df[c] = pd.to_numeric(df[c], errors="coerce")
     df["PAR"] = df["PTS"] + df["AST"] + df["REB"]
     return df.sort_values("GAME_DATE", ascending=False)
-
-@st.cache_data(ttl=6 * 3600, show_spinner=False)
-def get_player_full_history(player_id: int, start_year: int = 2015) -> pd.DataFrame:
-    frames = []
-    current_year = dt.date.today().year
-    for year in range(start_year, current_year + 1):
-        season = f"{year}-{str(year + 1)[-2:]}"
-        try:
-            df = playergamelog.PlayerGameLog(
-                player_id=player_id, season=season, season_type_all_star="Regular Season"
-            ).get_data_frames()[0]
-            df["GAME_DATE"] = pd.to_datetime(df["GAME_DATE"], errors="coerce")
-            for c in ("PTS", "AST", "REB"):
-                df[c] = pd.to_numeric(df[c], errors="coerce")
-            df["PAR"] = df["PTS"] + df["AST"] + df["REB"]
-            frames.append(df)
-            time.sleep(0.1)
-        except Exception:
-            continue
-    if not frames:
-        return pd.DataFrame()
-    out = pd.concat(frames, ignore_index=True)
-    return out.sort_values("GAME_DATE", ascending=False)
 
 # -------------------- HELPERS STATS --------------------
 def percent_over(series: pd.Series, line: float) -> Tuple[float, int, int]:
@@ -151,22 +130,7 @@ def calculate_over_under(series: pd.Series, line: float):
     over_c = int((s > line).sum())
     under_c = int((s < line).sum())
     total = len(s)
-    return (round(100 * over_c / total, 1),
-            round(100 * under_c / total, 1),
-            over_c, under_c)
-
-def filter_game_type(df: pd.DataFrame, game_type: str) -> pd.DataFrame:
-    if df is None or df.empty:
-        return df
-    if game_type == "Casa":
-        if "MATCHUP" not in df.columns:
-            return df.head(0)
-        return df[df["MATCHUP"].str.contains("vs", na=False)]
-    if game_type == "Ospite":
-        if "MATCHUP" not in df.columns:
-            return df.head(0)
-        return df[df["MATCHUP"].str.contains("@", na=False)]
-    return df
+    return round(100 * over_c / total, 1), round(100 * under_c / total, 1), over_c, under_c
 
 # -------------------- PLOTTING --------------------
 def plot_bar(df: pd.DataFrame, col: str, line: float, title: str, rotate: int = 45):
@@ -181,8 +145,15 @@ def plot_bar(df: pd.DataFrame, col: str, line: float, title: str, rotate: int = 
     colors = ["#10B981" if v > line else "#EF4444" for v in values]
     bars = ax.bar(range(len(values)), values, width=0.6, color=colors)
     for i, bar in enumerate(bars):
-        ax.text(bar.get_x()+bar.get_width()/2, bar.get_height()+0.3,
-                f"{values.iloc[i]:.0f}", ha="center", va="bottom", fontsize=8, color="#e5e7eb")
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            bar.get_height() + 0.3,
+            f"{values.iloc[i]:.0f}",
+            ha="center",
+            va="bottom",
+            fontsize=8,
+            color="#e5e7eb",
+        )
     ax.axhline(line, color="#9CA3AF", linestyle="--", linewidth=1.2, label=f"Linea {line:g}")
     fig.patch.set_facecolor("#0b0f14")
     ax.set_facecolor("#121821")
@@ -208,7 +179,6 @@ def extract_bet365(html: str) -> pd.DataFrame:
     rows = []
     pods = soup.select(".gl-MarketGroupPod.src-FixtureSubGroup")
     for pod in pods:
-        fix_el = pod.select_one(".src-FixtureSubGroupButton_Text")
         players_list = [_norm_text(e.get_text()) for e in pod.select(".srb-ParticipantLabelWithTeam_Name")]
         for market in pod.select(".gl-Market.gl-Market_General-columnheader"):
             header_el = market.select_one(".gl-MarketColumnHeader")
@@ -242,91 +212,183 @@ tab_batch, tab_single, tab_bet365 = st.tabs(["📥 Batch", "🔍 Singolo", "🧩
 # ========== BATCH ==========
 with tab_batch:
     st.subheader("📥 Analisi batch da Excel")
-    st.caption(f"File con colonne Giocatore e Linea — stagione {CURRENT_SEASON}")
-    metric = st.radio("📊 Metrica", ["Punti", "Assist", "Rimbalzi", "P+A+R"], horizontal=True)
+    st.caption(f"File con colonne **Giocatore** e **Linea** — Stagione {CURRENT_SEASON}")
+
+    metric = st.radio(
+        "📊 Metrica",
+        ["Punti", "Assist", "Rimbalzi", "P+A+R"],
+        horizontal=True,
+    )
     metric_map = {"Punti": "PTS", "Assist": "AST", "Rimbalzi": "REB", "P+A+R": "PAR"}
+
     upl = st.file_uploader("Carica file (.xlsx)", type=["xlsx"])
+
     if upl:
-        df_in = pd.read_excel(upl)
-        if not {"Giocatore", "Linea"}.issubset(df_in.columns):
-            st.error("Mancano colonne Giocatore o Linea.")
+        try:
+            df_in = pd.read_excel(upl)
+        except Exception as e:
+            st.error(f"Errore lettura file: {e}")
             st.stop()
+
+        if not {"Giocatore", "Linea"}.issubset(df_in.columns):
+            st.error("Il file deve contenere le colonne 'Giocatore' e 'Linea'.")
+            st.stop()
+
+        st.success("File caricato, avvio analisi…")
+
         results = []
-        progress = st.progress(0)
+        progress = st.progress(0.0)
+
+        # Cache locale per non richiamare più volte lo stesso player
+        local_cache: Dict[int, pd.DataFrame] = {}
+
+        def get_gl_cached(pid: int) -> pd.DataFrame:
+            if pid not in local_cache:
+                local_cache[pid] = get_player_gamelog(pid)
+            return local_cache[pid]
+
+        col_stat = metric_map[metric]
+
         for i, row in df_in.iterrows():
             player = str(row["Giocatore"])
             try:
                 line = float(str(row["Linea"]).replace(",", "."))
-            except:
+            except Exception:
                 line = 0.0
+
             pid = find_player_id_by_name(player)
+
             if pid is None:
-                results.append({"Giocatore": player, "Linea": line, "Over 5": "N/D", "Over 10": "N/D", "Over stagione": "N/D"})
-                progress.progress((i+1)/len(df_in))
+                results.append(
+                    {
+                        "Giocatore": player,
+                        "Linea": line,
+                        "Over 5 giornate": "N/D",
+                        "Over 10 giornate": "N/D",
+                        "Over intera stagione": "N/D",
+                    }
+                )
+                progress.progress((i + 1) / len(df_in))
                 continue
+
             try:
-                glog = get_player_gamelog(pid)
-            except:
-                results.append({"Giocatore": player, "Linea": line, "Over 5": "ERR", "Over 10": "ERR", "Over stagione": "ERR"})
-                progress.progress((i+1)/len(df_in))
+                glog = get_gl_cached(pid)
+            except Exception:
+                results.append(
+                    {
+                        "Giocatore": player,
+                        "Linea": line,
+                        "Over 5 giornate": "ERR",
+                        "Over 10 giornate": "ERR",
+                        "Over intera stagione": "ERR",
+                    }
+                )
+                progress.progress((i + 1) / len(df_in))
                 continue
-            col = metric_map[metric]
+
             last5 = glog.head(5)
             last10 = glog.head(10)
-            p5, _, _ = percent_over(last5[col], line)
-            p10, _, _ = percent_over(last10[col], line)
-            p_all, _, oc, uc = calculate_over_under(glog[col], line)
-            results.append({"Giocatore": player, "Linea": line, "Over 5": f"{p5}%", "Over 10": f"{p10}%", "Over stagione": f"{p_all}%"})
-            progress.progress((i+1)/len(df_in))
+
+            p5, _, _ = percent_over(last5[col_stat], line)
+            p10, _, _ = percent_over(last10[col_stat], line)
+            pall, _, _, _ = calculate_over_under(glog[col_stat], line)
+
+            results.append(
+                {
+                    "Giocatore": player,
+                    "Linea": line,
+                    "Over 5 giornate": f"{p5}%",
+                    "Over 10 giornate": f"{p10}%",
+                    "Over intera stagione": f"{pall}%",
+                }
+            )
+            progress.progress((i + 1) / len(df_in))
+
         df_out = pd.DataFrame(results)
         st.dataframe(df_out, use_container_width=True)
-        st.download_button("⬇️ Scarica Excel", data=to_excel_bytes(df_out), file_name="risultati_batch.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.download_button(
+            "⬇️ Scarica risultati (Excel)",
+            data=to_excel_bytes(df_out),
+            file_name="risultati_batch.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
 
 # ========== SINGOLO ==========
 with tab_single:
     st.subheader("🔍 Analisi giocatore singolo")
     q = st.text_input("Nome giocatore:")
+
     if q.strip():
         pid = find_player_id_by_name(q)
-        if pid:
-            m = st.radio("📌 Metrica", ["Punti", "Assist", "Rimbalzi", "P+A+R"], horizontal=True)
-            col = {"Punti": "PTS", "Assist": "AST", "Rimbalzi": "REB", "P+A+R": "PAR"}[m]
+        if not pid:
+            st.error("Giocatore non trovato tra gli attivi.")
+        else:
+            metric_s = st.radio(
+                "📌 Metrica",
+                ["Punti", "Assist", "Rimbalzi", "P+A+R"],
+                horizontal=True,
+            )
+            col_s = {"Punti": "PTS", "Assist": "AST", "Rimbalzi": "REB", "P+A+R": "PAR"}[metric_s]
+
             try:
-                df = get_player_gamelog(pid)
+                df_s = get_player_gamelog(pid)
             except Exception as e:
-                st.error(f"Errore NBA: {e}")
+                st.error(f"Errore nel recupero dati NBA: {e}")
                 st.stop()
-            line_raw = st.number_input(f"🎯 Linea {m.lower()}", 0.0, 120.0, 20.5, 1.0, format="%.1f")
+
+            defaults = {"PTS": 20.5, "AST": 5.5, "REB": 6.5, "PAR": 30.5}
+            default_line = defaults.get(col_s, 20.5)
+
+            line_raw = st.number_input(
+                f"🎯 Linea {metric_s.lower()}",
+                min_value=0.0,
+                max_value=120.0,
+                value=default_line,
+                step=1.0,
+                format="%.1f",
+                help="La linea viene sempre forzata al .5 (es. 20.5, 21.5, 22.5).",
+            )
             line = force_half(line_raw)
-            st.subheader("📈 Grafico")
-            plot_bar(df.head(10), col, line, f"{q} — {m}")
+
+            st.subheader("📈 Grafico (ultime 10 partite)")
+            plot_bar(df_s.head(10), col_s, line, f"{q} — {metric_s}")
+
             st.subheader("📊 Statistiche")
-            p5, o5, t5 = percent_over(df.head(5)[col], line)
-            p10, o10, t10 = percent_over(df.head(10)[col], line)
-            pall, _, oc, uc = calculate_over_under(df[col], line)
-            st.write(f"Ultime 5: {p5}% ({o5}/{t5})")
-            st.write(f"Ultime 10: {p10}% ({o10}/{t10})")
-            st.write(f"Intera stagione: {pall}% over ({oc}/{len(df)})")
+            p5, o5, t5 = percent_over(df_s.head(5)[col_s], line)
+            p10, o10, t10 = percent_over(df_s.head(10)[col_s], line)
+            pall, _, oc, uc = calculate_over_under(df_s[col_s], line)
+
+            st.write(f"Ultime 5: **{p5}%** over ({o5}/{t5})")
+            st.write(f"Ultime 10: **{p10}%** over ({o10}/{t10})")
+            st.write(f"Intera stagione: **{pall}%** over ({oc}/{len(df_s)})")
 
 # ========== BET365 ==========
 with tab_bet365:
-    st.subheader("🧩 Estrazione Bet365 (Più di)")
+    st.subheader("🧩 Estrazione Bet365 (Più di → Excel)")
+    st.caption("Estrae solo Giocatore e Linea per il mercato 'Più di', deduplicato.")
+
     html_file = st.file_uploader("Carica file .html / .txt", type=["html", "htm", "txt"])
-    html_text = st.text_area("Oppure incolla qui il codice HTML", height=200)
+    html_text = st.text_area("Oppure incolla qui l'HTML", height=200)
+
     html_content = ""
-    if html_file:
+    if html_file is not None:
         html_content = html_file.read().decode("utf-8", errors="ignore")
     elif html_text.strip():
         html_content = html_text
+
     if st.button("🔎 Estrai"):
         if not html_content.strip():
-            st.warning("Incolla o carica l'HTML prima di procedere.")
+            st.warning("Carica un file o incolla l'HTML prima di procedere.")
             st.stop()
-        df = extract_bet365(html_content)
-        if df.empty:
-            st.error("Nessun dato trovato.")
+        df_b = extract_bet365(html_content)
+        if df_b.empty:
+            st.error("Nessun dato riconosciuto. Verifica l'HTML di Bet365.")
         else:
-            st.success(f"{len(df)} righe trovate")
-            st.dataframe(df, use_container_width=True)
-            st.download_button("⬇️ Scarica Excel", data=to_excel_bytes(df),
-                               file_name="bet365_linee.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            st.success(f"Righe univoche trovate: {len(df_b)}")
+            st.dataframe(df_b, use_container_width=True)
+            st.download_button(
+                "⬇️ Scarica Excel",
+                data=to_excel_bytes(df_b),
+                file_name="bet365_giocatori_linee.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )

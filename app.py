@@ -1,8 +1,9 @@
-# app.py — NBA Stats + Bet365 Extractor (centrato/compatto)
-# - Valori sulle barre SEMPRE visibili (niente checkbox)
+# app.py — NBA Stats + Bet365 Extractor (centrato/compatto, spinner ridotti)
+# - show_spinner=False su tutte le cache (niente "Running get_player_gamelog(...)")
+# - RIMOSSO teams_roster_map/commonteamroster (niente loop pesante sui roster)
 # - "Ultime 5/10" cross-stagione; "Intera stagione" = solo stagione corrente
 # - Vs avversario: stagione corrente, precedente, carriera
-# - Nuova scheda: 🧩 Estrazione Bet365 (HTML → Excel/CSV)
+# - Scheda: 🧩 Estrazione Bet365 (HTML → Excel/CSV)
 
 import math
 import datetime as dt
@@ -17,12 +18,11 @@ import pandas as pd
 import streamlit as st
 from bs4 import BeautifulSoup
 from nba_api.stats.static import players, teams
-from nba_api.stats.endpoints import playergamelog, commonteamroster
+from nba_api.stats.endpoints import playergamelog
 
 # -------------------- CONFIG UI --------------------
 st.set_page_config(page_title="NBA Stats + Bet365", layout="centered")
 
-# Limita la larghezza massima del contenitore centrale
 st.markdown(
     """
     <style>
@@ -38,7 +38,10 @@ st.markdown(
 )
 
 st.title("🏀 NBA Stats — Props-style Analyzer")
-st.caption("Ricerca giocatore, percentuali Over/Under, grafico a barre, filtri casa/trasferta, storico vs avversario. + 🧩 Estrazione Bet365 HTML.")
+st.caption(
+    "Ricerca giocatore, percentuali Over/Under, grafico a barre, filtri casa/trasferta, "
+    "storico vs avversario. + 🧩 Estrazione Bet365 HTML."
+)
 
 # -------------------- UTILITIES (NBA) --------------------
 def normalize_name(name: str) -> str:
@@ -71,9 +74,9 @@ def with_retry(fn, *args, attempts: int = 3, wait_secs: float = 0.8, **kwargs):
                 time.sleep(wait_secs)
     raise last_exc
 
-# forza qualunque numero al formato N + 0.5 (ed applica i limiti)
 def force_half(value: float, min_v: float = 0.0, max_v: float = 120.0) -> float:
-    v = math.floor(value) + 0.5
+    """Forza la linea a N + 0.5 e rispetta i limiti min/max."""
+    v = math.floor(float(value)) + 0.5
     if v < min_v + 0.5:
         v = min_v + 0.5
     if v > max_v - 0.5:
@@ -81,11 +84,11 @@ def force_half(value: float, min_v: float = 0.0, max_v: float = 120.0) -> float:
     return v
 
 # -------------------- DATA LAYERS (NBA, CACHED) --------------------
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=3600, show_spinner=False)
 def cached_all_players() -> List[Dict]:
     return players.get_players()
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=3600, show_spinner=False)
 def cached_teams() -> List[Dict]:
     return teams.get_teams()
 
@@ -97,15 +100,17 @@ def find_player_id_by_name(player_name: str) -> Optional[int]:
     all_players = cached_all_players()
     norm_candidate = normalize_name(candidate)
 
+    # match esatto
     for p in all_players:
         if normalize_name(p["full_name"]) == norm_candidate:
             return p["id"]
+    # match parziale
     for p in all_players:
         if norm_candidate in normalize_name(p["full_name"]):
             return p["id"]
     return None
 
-@st.cache_data(ttl=1800)
+@st.cache_data(ttl=1800, show_spinner=False)
 def get_player_gamelog(player_id: int, season: str = CURRENT_SEASON) -> pd.DataFrame:
     def _call():
         return playergamelog.PlayerGameLog(
@@ -118,7 +123,7 @@ def get_player_gamelog(player_id: int, season: str = CURRENT_SEASON) -> pd.DataF
     df["PAR"] = df["PTS"] + df["AST"] + df["REB"]
     return df.sort_values("GAME_DATE", ascending=False)
 
-@st.cache_data(ttl=6 * 3600)
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
 def get_player_full_history(player_id: int, start_year: int = 2000) -> pd.DataFrame:
     frames = []
     for year in range(start_year, dt.date.today().year + 1):
@@ -141,21 +146,6 @@ def get_player_full_history(player_id: int, start_year: int = 2000) -> pd.DataFr
         return pd.DataFrame()
     out = pd.concat(frames, ignore_index=True)
     return out.sort_values("GAME_DATE", ascending=False)
-
-@st.cache_data(ttl=6 * 3600)
-def teams_roster_map(season: str = CURRENT_SEASON) -> Dict[int, str]:
-    mapping: Dict[int, str] = {}
-    for t in cached_teams():
-        try:
-            def _call():
-                return commonteamroster.CommonTeamRoster(team_id=t["id"], season=season).get_data_frames()[0]
-            roster = with_retry(_call)
-            for _, row in roster.iterrows():
-                mapping[int(row["PLAYER_ID"])] = t["abbreviation"]
-            time.sleep(0.2)
-        except Exception:
-            continue
-    return mapping
 
 # -------------------- HELPERS STATS --------------------
 def percent_over(series: pd.Series, line: float) -> Tuple[float, int, int]:
@@ -215,8 +205,12 @@ def plot_bar(df: pd.DataFrame, col: str, line: float, title: str,
 
     # Valori SEMPRE visibili
     for i, bar in enumerate(bars):
-        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.3,
-                f"{values.iloc[i]:.0f}", ha="center", va="bottom", fontsize=8, color="#e5e7eb")
+        ax.text(
+            bar.get_x() + bar.get_width()/2,
+            bar.get_height() + 0.3,
+            f"{values.iloc[i]:.0f}",
+            ha="center", va="bottom", fontsize=8, color="#e5e7eb"
+        )
 
     ax.axhline(line, color="#9CA3AF", linestyle="--", linewidth=1.2, label=f"Linea {line:g}")
 
@@ -232,7 +226,6 @@ def plot_bar(df: pd.DataFrame, col: str, line: float, title: str,
     ax.set_ylabel(col, fontsize=10)
     ax.set_xlabel("")
 
-    # Date SEMPRE visibili sotto (anche intera stagione)
     ax.set_xticks(range(len(labels)))
     ax.set_xticklabels(labels, rotation=rotate, ha="right", fontsize=8)
 
@@ -315,7 +308,7 @@ def parse_over_under_layout(soup: BeautifulSoup, market_filter: str):
 def parse_columns_layout(soup: BeautifulSoup):
     rows = []
     fixture_el = soup.select_one(".src-FixtureSubGroupButton_Text")
-    fixture = _norm_text(fixture_el.get_text()) if fixture_el else ""
+    fixture = _norm_text(fix_el.get_text()) if (fix_el := fixture_el) else ""
     players_list = [_norm_text(e.get_text()) for e in soup.select(".srb-ParticipantLabelWithTeam_Name")]
     if not players_list:
         return rows
@@ -365,10 +358,17 @@ tab_batch, tab_single, tab_bet365 = st.tabs([
 # ==================== TAB: BATCH ====================
 with tab_batch:
     st.subheader("📥 Carica file Excel per analisi batch")
-    st.caption(f"Il file deve contenere le colonne **Giocatore** e **Linea**. Stagione corrente: **{CURRENT_SEASON}** (Regular Season).")
+    st.caption(
+        f"Il file deve contenere le colonne **Giocatore** e **Linea**. "
+        f"Stagione corrente: **{CURRENT_SEASON}** (Regular Season)."
+    )
 
-    metric_choice = st.radio("📊 Scegli la metrica da analizzare",
-                             ["Punti", "Assist", "Rimbalzi", "P+A+R"], horizontal=True, key="batch_metric")
+    metric_choice = st.radio(
+        "📊 Scegli la metrica da analizzare",
+        ["Punti", "Assist", "Rimbalzi", "P+A+R"],
+        horizontal=True,
+        key="batch_metric",
+    )
     metric_map = {"Punti": "PTS", "Assist": "AST", "Rimbalzi": "REB", "P+A+R": "PAR"}
 
     uploaded = st.file_uploader("📁 Carica Excel (.xlsx)", type=["xlsx"], key="batch_upload")
@@ -387,11 +387,17 @@ with tab_batch:
         st.success("File caricato correttamente. Avvio analisi…")
         results = []
         progress = st.progress(0)
-        roster_map = teams_roster_map()
 
         for i, row in df_in.iterrows():
             player_name = str(row["Giocatore"])
-            line = float(row["Linea"])
+            try:
+                line = float(row["Linea"])
+            except Exception:
+                try:
+                    line = float(str(row["Linea"]).replace(",", "."))
+                except Exception:
+                    line = 0.0
+
             pid = find_player_id_by_name(player_name)
 
             if pid is None:
@@ -407,15 +413,21 @@ with tab_batch:
                 glog = get_player_gamelog(pid)  # stagione corrente (per % stagione)
             except Exception:
                 results.append({
-                    "Giocatore": player_name, "Squadra": roster_map.get(pid, "N/D"), "Linea": line,
+                    "Giocatore": player_name, "Squadra": "N/D", "Linea": line,
                     "% Over 5G": "ERR", "% Over 10G": "ERR",
                     "% Over Stagione": "ERR", "% Under Stagione": "ERR", "% Push Stagione": "ERR",
                 })
                 progress.progress((i + 1) / len(df_in))
                 continue
 
+            # squadra dal gamelog corrente
+            team = "N/D"
+            if "TEAM_ABBREVIATION" in glog.columns and not glog.empty:
+                team = str(glog["TEAM_ABBREVIATION"].iloc[0])
+
             col = metric_map[metric_choice]
-            # Ultime 5/10 cross-stagione
+
+            # Ultime 5/10 cross-stagione (Totale)
             last5 = get_last_n_games_cross_seasons(pid, 5, "Totale")
             last10 = get_last_n_games_cross_seasons(pid, 10, "Totale")
 
@@ -425,7 +437,7 @@ with tab_batch:
 
             results.append({
                 "Giocatore": player_name,
-                "Squadra": roster_map.get(pid, "N/D"),
+                "Squadra": team,
                 "Linea": line,
                 "% Over 5G": f"{p5}%",
                 "% Over 10G": f"{p10}%",
@@ -439,12 +451,16 @@ with tab_batch:
         st.dataframe(df_out, use_container_width=True, hide_index=True)
 
         bio = io.BytesIO()
-        df_out.to_excel(bio, index=False, engine="openpyxl")
+        with pd.ExcelWriter(bio, engine="openpyxl") as writer:
+            df_out.to_excel(writer, index=False, sheet_name="risultati")
         bio.seek(0)
-        st.download_button("⬇️ Scarica risultati (Excel)", data=bio.read(),
-                           file_name="risultati_over_under.xlsx",
-                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                           use_container_width=True)
+        st.download_button(
+            "⬇️ Scarica risultati (Excel)",
+            data=bio.read(),
+            file_name="risultati_over_under.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
 
 # ==================== TAB: SINGLE ====================
 with tab_single:
@@ -461,10 +477,18 @@ with tab_single:
             sel = st.selectbox("Seleziona il giocatore", matches, format_func=lambda p: p["full_name"])
             pid = sel["id"]
 
-            m = st.radio("📌 Scegli la metrica", ["Punti", "Assist", "Rimbalzi", "P+A+R"],
-                         horizontal=True, key="single_metric")
-            game_type = st.radio("🎯 Tipo di partita", ["Totale", "Casa", "Ospite"],
-                                 horizontal=True, key="single_gtype")
+            m = st.radio(
+                "📌 Scegli la metrica",
+                ["Punti", "Assist", "Rimbalzi", "P+A+R"],
+                horizontal=True,
+                key="single_metric",
+            )
+            game_type = st.radio(
+                "🎯 Tipo di partita",
+                ["Totale", "Casa", "Ospite"],
+                horizontal=True,
+                key="single_gtype",
+            )
 
             col_map = {"Punti": "PTS", "Assist": "AST", "Rimbalzi": "REB", "P+A+R": "PAR"}
             col = col_map[m]
@@ -477,17 +501,18 @@ with tab_single:
 
             df_cur = filter_game_type(df_cur, game_type)
 
-            # --- Linea: solo .5, scatti di 1 ---
+            # Linea: solo .5, step 1
             defaults = {"PTS": 20.5, "AST": 5.5, "REB": 6.5, "PAR": 30.5}
             default_line = defaults[col]
             line_raw = st.number_input(
                 f"🎯 Inserisci la linea {m.lower()}",
-                min_value=0.0, max_value=120.0, value=default_line, step=1.0, format="%.1f",
-                help="Si muove di 1 alla volta ed è sempre .5 (es. 20.5 → 21.5 → 22.5)."
+                min_value=0.0, max_value=120.0, value=default_line,
+                step=1.0, format="%.1f",
+                help="Si muove di 1 alla volta ed è sempre .5 (es. 20.5 → 21.5 → 22.5).",
             )
             line = force_half(line_raw)
 
-            # --- Grafico (valori e date sempre visibili) ---
+            # Grafico
             st.subheader("📈 Grafico")
             chart_range = st.selectbox("Intervallo", ["Ultime 5", "Ultime 10", "Intera stagione"])
             if chart_range == "Ultime 5":
@@ -502,14 +527,14 @@ with tab_single:
                 title = f"{sel['full_name']} | Intera stagione — {m}"
                 plot_bar(df_cur, col, line, title, rotate=45, compact=False)
 
-            # --- Statistiche ---
+            # Statistiche
             st.subheader(f"📊 Statistiche {m.lower()}")
             last5 = get_last_n_games_cross_seasons(pid, 5, game_type)
             last10 = get_last_n_games_cross_seasons(pid, 10, game_type)
 
             p5, o5, t5 = percent_over(last5[col], line)
             p10, o10, t10 = percent_over(last10[col], line)
-            pall_over, pall_under, pall_push, oc, uc, pc = calculate_over_under_push(df_cur[col], line)  # corrente
+            pall_over, pall_under, pall_push, oc, uc, pc = calculate_over_under_push(df_cur[col], line)
 
             st.write(f"**Ultime 5 (cross-stagione)**: {p5}% over ({o5}/{t5})")
             st.write(f"**Ultime 10 (cross-stagione)**: {p10}% over ({o10}/{t10})")
@@ -518,17 +543,15 @@ with tab_single:
                 f"Under {pall_under}% ({uc}/{len(df_cur)}), Push {pall_push}% ({pc}/{len(df_cur)})"
             )
 
-            # --- Vs Avversario: stagione corrente, stagione precedente, carriera ---
+            # Vs avversario
             st.subheader("🆚 Storico vs avversario")
             team_abbrs = sorted({t["abbreviation"] for t in cached_teams()})
             opp = st.selectbox("Seleziona squadra avversaria", ["—"] + team_abbrs)
 
             if opp != "—":
-                # Corrente
                 df_vs_cur = df_cur[df_cur["MATCHUP"].str.contains(opp, na=False)]
                 pov_cur, ovc_cur, totc_cur = percent_over(df_vs_cur[col], line)
 
-                # Precedente
                 prev = prev_season(CURRENT_SEASON)
                 try:
                     df_prev = get_player_gamelog(pid, season=prev)
@@ -538,7 +561,6 @@ with tab_single:
                 df_vs_prev = df_prev[df_prev["MATCHUP"].str.contains(opp, na=False)]
                 pov_prev, ovc_prev, totc_prev = percent_over(df_vs_prev[col], line)
 
-                # Carriera
                 df_hist = get_player_full_history(pid)
                 df_hist = filter_game_type(df_hist, game_type)
                 df_vs_all = df_hist[df_hist["MATCHUP"].str.contains(opp, na=False)]
@@ -551,17 +573,26 @@ with tab_single:
 # ==================== TAB: BET365 EXTRACTOR ====================
 with tab_bet365:
     st.subheader("🧩 Estrazione Bet365 (HTML → Excel/CSV)")
-    st.caption("Incolla o carica l’HTML Bet365. Estrae **Giocatore, Linea, Quota**. Supporto per Over/Under e layout a colonne (0, 5, 10, ...).")
+    st.caption(
+        "Incolla o carica l’HTML Bet365. Estrae **Giocatore, Linea, Quota**. "
+        "Supporto per Over/Under e layout a colonne (0, 5, 10, ...)."
+    )
 
     market_opt = st.selectbox("Mercato da estrarre", ["Più di", "Meno di", "Entrambi"], index=0)
     market_val = {"Più di": "over", "Meno di": "under", "Entrambi": "both"}[market_opt]
-    deduplicate = st.checkbox("Rimuovi duplicati (per Fixture+Player+Line+Odds)", value=(market_val != "both"))
+    deduplicate = st.checkbox(
+        "Rimuovi duplicati (per Fixture+Player+Line+Odds)",
+        value=(market_val != "both"),
+    )
 
     tab_file, tab_paste = st.tabs(["📁 Carica file HTML/TXT", "📋 Incolla HTML"])
     html_content = ""
 
     with tab_file:
-        up = st.file_uploader("Carica un file .html / .txt esportato da Bet365", type=["html", "htm", "txt"])
+        up = st.file_uploader(
+            "Carica un file .html / .txt esportato da Bet365",
+            type=["html", "htm", "txt"],
+        )
         if up is not None:
             html_content = up.read().decode("utf-8", errors="ignore")
 
@@ -578,11 +609,12 @@ with tab_bet365:
         with st.spinner("Estrazione in corso..."):
             df_ext = extract_bet365(html_content, market_filter=market_val)
             if df_ext.empty and market_val != "both":
-                # se non trova nel filtro, prova fallback both (magari header localizzati)
                 df_ext = extract_bet365(html_content, market_filter="both")
 
             if deduplicate and not df_ext.empty:
-                df_ext = df_ext.drop_duplicates(subset=["Fixture", "Player", "Line", "Odds"]).reset_index(drop=True)
+                df_ext = df_ext.drop_duplicates(
+                    subset=["Fixture", "Player", "Line", "Odds"]
+                ).reset_index(drop=True)
 
         if df_ext.empty:
             st.error("Nessun dato riconosciuto. Verifica di aver incollato l’HTML corretto.")
@@ -590,15 +622,23 @@ with tab_bet365:
             st.success(f"✅ Righe estratte: {len(df_ext)}")
             st.dataframe(df_ext, use_container_width=True, hide_index=True)
 
-            # Download
             csv_bytes = df_ext.to_csv(index=False, encoding="utf-8").encode("utf-8")
             xlsx_bytes = to_excel_bytes(df_ext)
 
             c1, c2 = st.columns(2)
             with c1:
-                st.download_button("⬇️ Scarica CSV", data=csv_bytes, file_name="bet365_estratto.csv",
-                                   mime="text/csv", use_container_width=True)
+                st.download_button(
+                    "⬇️ Scarica CSV",
+                    data=csv_bytes,
+                    file_name="bet365_estratto.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
             with c2:
-                st.download_button("⬇️ Scarica Excel", data=xlsx_bytes, file_name="bet365_estratto.xlsx",
-                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                   use_container_width=True)
+                st.download_button(
+                    "⬇️ Scarica Excel",
+                    data=xlsx_bytes,
+                    file_name="bet365_estratto.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )

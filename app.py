@@ -155,10 +155,18 @@ def calculate_over_under_push(series: pd.Series, line: float):
             round(100 * push_c / total, 1), over_c, under_c, push_c)
 
 def filter_game_type(df: pd.DataFrame, game_type: str) -> pd.DataFrame:
+    """Filtra per Casa/Ospite se possibile; se manca MATCHUP, restituisce df vuoto per i filtri."""
+    if df is None or df.empty:
+        return df
     if game_type == "Casa":
+        if "MATCHUP" not in df.columns:
+            return df.head(0)
         return df[df["MATCHUP"].str.contains("vs", na=False)]
     if game_type == "Ospite":
+        if "MATCHUP" not in df.columns:
+            return df.head(0)
         return df[df["MATCHUP"].str.contains("@", na=False)]
+    # Totale
     return df
 
 # -------------------- PLOTTING --------------------
@@ -522,7 +530,10 @@ with tab_single:
 
             if opp != "—":
                 # Corrente
-                df_vs_cur = df_cur[df_cur["MATCHUP"].str.contains(opp, na=False)]
+                if "MATCHUP" in df_cur.columns:
+                    df_vs_cur = df_cur[df_cur["MATCHUP"].str.contains(opp, na=False)]
+                else:
+                    df_vs_cur = pd.DataFrame()
                 pov_cur, ovc_cur, totc_cur = percent_over(df_vs_cur[col], line)
 
                 # Precedente
@@ -532,7 +543,11 @@ with tab_single:
                     df_prev = filter_game_type(df_prev_raw, game_type)
                 except Exception:
                     df_prev = pd.DataFrame()
-                df_vs_prev = df_prev[df_prev["MATCHUP"].str.contains(opp, na=False)]
+
+                if "MATCHUP" in df_prev.columns:
+                    df_vs_prev = df_prev[df_prev["MATCHUP"].str.contains(opp, na=False)]
+                else:
+                    df_vs_prev = pd.DataFrame()
                 pov_prev, ovc_prev, totc_prev = percent_over(df_vs_prev[col], line)
 
                 # "Carriera" dal 2015
@@ -541,7 +556,11 @@ with tab_single:
                     df_hist = filter_game_type(df_hist, game_type)
                 except Exception:
                     df_hist = pd.DataFrame()
-                df_vs_all = df_hist[df_hist["MATCHUP"].str.contains(opp, na=False)]
+
+                if "MATCHUP" in df_hist.columns:
+                    df_vs_all = df_hist[df_hist["MATCHUP"].str.contains(opp, na=False)]
+                else:
+                    df_vs_all = pd.DataFrame()
                 pov_all, ovc_all, totc_all = percent_over(df_vs_all[col], line)
 
                 st.write(f"**Stagione corrente vs {opp}**: {pov_cur}% over ({ovc_cur}/{totc_cur})")

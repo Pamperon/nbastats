@@ -1,5 +1,5 @@
 # app.py — NBA Stats + Bet365 (versione semplificata / robusta + piccoli ritocchi UI)
-# - Batch: output = Giocatore, Linea, Over 5 giornate, Over 10 giornate, Over intera stagione
+# - Batch: output = Giocatore, Squadra, Linea, Over 5 giornate, Over 10 giornate, Over intera stagione
 # - Singolo: nessun riferimento al Push (solo Over/Under)
 # - Bet365: solo mercato "Più di", output solo Giocatore/Linea, deduplicato, download solo Excel
 # - Batch / 5-10 gare: SOLO stagione corrente (più stabile)
@@ -386,6 +386,7 @@ with tab_batch:
             if pid is None:
                 results.append({
                     "Giocatore": player_name,
+                    "Squadra": "N/D",
                     "Linea": line,
                     "Over 5 giornate": "N/D",
                     "Over 10 giornate": "N/D",
@@ -399,6 +400,7 @@ with tab_batch:
             except Exception:
                 results.append({
                     "Giocatore": player_name,
+                    "Squadra": "ERR",
                     "Linea": line,
                     "Over 5 giornate": "ERR",
                     "Over 10 giornate": "ERR",
@@ -408,6 +410,15 @@ with tab_batch:
                 continue
 
             col = metric_map[metric_choice]
+
+            # Ricava l'abbreviazione squadra dal MATCHUP (es. "DEN vs LAL" → "DEN")
+            team_abbr = "N/D"
+            if "MATCHUP" in glog_cur.columns and not glog_cur.empty:
+                try:
+                    sample_matchup = str(glog_cur.iloc[0]["MATCHUP"])
+                    team_abbr = sample_matchup.split(" ")[0] if sample_matchup else "N/D"
+                except Exception:
+                    team_abbr = "N/D"
 
             # Ultime 5/10 SOLO stagione corrente
             combo = glog_cur.sort_values("GAME_DATE", ascending=False)
@@ -420,6 +431,7 @@ with tab_batch:
 
             results.append({
                 "Giocatore": player_name,
+                "Squadra": team_abbr,
                 "Linea": line,
                 "Over 5 giornate": f"{p5}%",
                 "Over 10 giornate": f"{p10}%",
